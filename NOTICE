@@ -1,0 +1,13 @@
+cgscli
+Copyright (c) cgscli contributors. Licensed under AGPL-3.0-only (LICENSE); patches/ under MIT (patches/LICENSE).
+
+Third-party notices
+- omp (can1357/oh-my-pi), MIT: not included; fetched at the commit pinned in omp.lock.json and patched with patches/.
+- @noble/curves, @noble/hashes, @noble/ciphers (Paul Miller), MIT: used for Ed25519, X25519, BLAKE2s, ChaCha20-Poly1305.
+- Noise_NK parameters and the tunnel configuration format follow new-api tunnelkit (AGPL-3.0, same owner).
+- TSP framing follows stencil-hq/tern-sdk (MIT); retain its notice if code is copied from it.
+- ompweb (kahme247/ompweb, MIT, (c) agegr): interaction reference only, no code included.
+
+Bundled components (Chromium, LLVM, cmake, ninja, Git for Windows) are downloaded unmodified; their licenses and
+source-availability statements are listed in THIRD_PARTY.md once components.lock has entries. Facts about those
+licenses are still unverified (see legal/LICENSING.md in the docs repository).

@@ -1,0 +1,15 @@
+{
+  "name": "cgscli",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "workspaces": ["packages/*", "plugin/*"],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0"
+  }
+}
