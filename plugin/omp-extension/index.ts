@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CGSCONNECT_ORIGIN, createComponentManager, createConnect, currentPlatform, parseComponentsLock, type ComponentManagerImpl } from "@cgscli/connect";
+import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
 import { deviceLogin } from "./login.ts";
+import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager, createConnect, currentPlatform, parseComponentsLock, resolveAgentDir, type ComponentManagerImpl, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { registerRemoteCommands } from "./remote.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
@@ -24,6 +25,7 @@ interface OAuthCredentials { refresh: string; access: string; expires: number }
 interface CommandContext { ui: { notify(message: string, level?: "info" | "warning" | "error"): void } }
 interface ExtensionApi {
   registerProvider(name: string, config: Record<string, unknown>): void;
+  unregisterProvider?(name: string): void;
   registerCommand(name: string, options: { description?: string; handler(args: string, ctx: CommandContext): Promise<void> }): void;
 }
 
@@ -95,8 +97,11 @@ interface CgsCredentials extends OAuthCredentials { enterpriseUrl?: string; emai
 /** The part of cgsconnect login needs: the Bootstrap-selected origin and a fetch that leaves through the router. */
 export interface LoginRoute { ready(): Promise<void>; upstream(): string; fetch(req: Request): Promise<Response> }
 
-/** `/login` -> Cicori Good Service: device flow (page approval + polling) through the router. No server prompt (ADR 0015). */
-export function cgsLoginProvider(route: LoginRoute, env: NodeJS.ProcessEnv = process.env) {
+/**
+ * `/login` -> Cicori Good Service: device flow (page approval + polling) through the router. No server prompt (ADR 0015).
+ * `onLoggedIn` runs after approval (model list, prices, layout); its error fails the login with a readable message.
+ */
+export function cgsLoginProvider(route: LoginRoute, env: NodeJS.ProcessEnv = process.env, onLoggedIn?: (a: LoggedIn) => Promise<unknown>) {
   return {
     name: "Cicori Good Service",
     async login(cb: LoginCallbacks): Promise<CgsCredentials> {
@@ -106,7 +111,10 @@ export function cgsLoginProvider(route: LoginRoute, env: NodeJS.ProcessEnv = pro
         onProgress: (e) => { if (e.phase === "waiting") cb.onAuth({ url: e.verificationUrl, instructions: "Approve this device in your browser, then return here." }); else cb.onProgress?.(e.phase === "solving" ? "Solving security check…" : "Creating login session…"); },
       });
       // The credential records the logical origin, not the mirror Bootstrap happened to pick on this network.
-      return { access: r.clientSecret, refresh: r.clientSecret, expires: Date.now() + LONG_LIVED_MS, enterpriseUrl: logicalOrigin(env), email: r.username };
+      const baseUrl = logicalOrigin(env);
+      cb.onProgress?.("Fetching models and prices…");
+      await onLoggedIn?.({ baseUrl, clientSecret: r.clientSecret, username: r.username, tier: r.tier });
+      return { access: r.clientSecret, refresh: r.clientSecret, expires: Date.now() + LONG_LIVED_MS, enterpriseUrl: baseUrl, email: r.username };
     },
     // The client credential does not expire client-side; a 401 from the server is handled by logging in again.
     refreshToken: async (c: CgsCredentials) => ({ ...c, expires: Date.now() + LONG_LIVED_MS }),
@@ -116,12 +124,20 @@ export function cgsLoginProvider(route: LoginRoute, env: NodeJS.ProcessEnv = pro
 
 type FetchFn = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-/** Registers the CGS channels served by cgsconnect; every request to cgsconnect goes through `via` (a direct call into cgsconnect in production). */
+/**
+ * Registers the CGS channels served by cgsconnect; every request to cgsconnect goes through `via` (a direct call into
+ * cgsconnect in production). Credentials: `apiKey` names an environment variable that holds the client credential (the
+ * server issues no per-channel slots today); a stored slot login (`oauth`) takes precedence once the server issues them.
+ * Channels the manifest no longer has are unregistered.
+ */
 export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<void> {
-  for (const p of asManifest(await getJson(via, `${CGSCONNECT_ORIGIN}/_cgsconnect/manifest`))) {
+  const providers = asManifest(await getJson(via, `${CGSCONNECT_ORIGIN}/_cgsconnect/manifest`));
+  for (const c of CHANNELS) if (!providers.some((p) => p.id === c)) pi.unregisterProvider?.(c);
+  for (const p of providers) {
     pi.registerProvider(p.id, {
       baseUrl: p.baseUrl,
       api: API[p.channel],
+      apiKey: p.channel === "cgs-antigravity" ? ANTIGRAVITY_KEY_ENV : SECRET_ENV,
       models: p.models.map((m) => ({
         id: m.id,
         name: m.name,
@@ -153,12 +169,52 @@ export function divert(via: FetchFn): () => void {
   return () => { globalThis.fetch = orig; };
 }
 
+/** What a completed login hands to the account sync. */
+export interface LoggedIn { baseUrl: string; clientSecret: string; username?: string; tier?: string }
+
+export interface AccountSyncOptions {
+  pi: ExtensionApi;
+  connect: { router: { fetch(req: Request): Promise<Response> }; hub: ProviderHubImpl; fetch(req: Request): Promise<Response> };
+  agentDir: string;
+  /** Test seam; production uses applyDefaultLayout from @cgscli/connect. */
+  applyLayout?: typeof applyDefaultLayout;
+}
+
+/**
+ * Everything that follows a login or a start with a stored credential: put the credential where the channels' `apiKey`
+ * points, fetch the model list and the prices through the router, hand them to the hub, re-register the channels (omp
+ * picks the new models up without a restart), store the account, and apply the server default layout once.
+ * Throws a message fit to show the user when no model list can be had.
+ */
+export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<string[]> {
+  const via = (r: Request) => o.connect.router.fetch(r);
+  applyCredentialEnv(a.clientSecret);
+  const [ids, pricing] = await Promise.all([fetchModelIds(via, a.baseUrl, a.clientSecret), fetchPricing(via, a.baseUrl, a.clientSecret)]);
+  const prior = readAccount(o.agentDir);
+  const prices = pricing ?? prior?.pricing ?? {};
+  o.connect.hub.setModels(ids, prices);
+  await registerChannels(o.pi, (i, init) => o.connect.fetch(new Request(i, init)));
+  writeAccount(o.agentDir, { ...a, models: ids, pricing: prices });
+  await (o.applyLayout ?? applyDefaultLayout)({ agentDir: o.agentDir, baseUrl: a.baseUrl, clientSecret: a.clientSecret, fetch: via });
+  return ids;
+}
+
 export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
-  const connect = createConnect({ upstream: candidatesFrom(), cloudflare: cloudflareFrom(), dataDir: path.join(process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs"), "connect") });
+  const home = process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs");
+  const connect = createConnect({ upstream: candidatesFrom(), cloudflare: cloudflareFrom(), dataDir: path.join(home, "connect") });
   process.once("exit", () => connect.stop());
-  pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router) });
+  const agentDir = resolveAgentDir();
+  const sync = (a: LoggedIn) => syncAccount({ pi, connect, agentDir }, a);
+  pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync) });
   registerComponentCommands(pi);
   registerRemoteCommands(pi);
   divert((i, init) => connect.fetch(new Request(i, init)));
-  await registerChannels(pi, (i, init) => connect.fetch(new Request(i, init)));
+  // A stored account: the channels exist from the last known list at once, then the list and prices are refreshed in the background.
+  const account = readAccount(agentDir);
+  if (account) {
+    applyCredentialEnv(account.clientSecret);
+    connect.hub.setModels(account.models, account.pricing);
+    await registerChannels(pi, (i, init) => connect.fetch(new Request(i, init)));
+    void sync(account).catch((e) => process.stderr.write(`cgs: ${e instanceof Error ? e.message : e}\n`));
+  }
 }

@@ -91,7 +91,7 @@ test("extension registers providers with oauth from the live manifest and hands 
   await registerChannels({ registerProvider: (n, c) => void (reg[n] = c), registerCommand: () => {} }, (i, init) => hub.fetch(new Request(i, init)));
   expect(Object.keys(reg).sort()).toEqual(["cgs-claude", "cgs-codex"]);
   expect(reg["cgs-claude"].api).toBe("anthropic-messages");
-  expect(reg["cgs-claude"].apiKey).toBeUndefined();
+  expect(reg["cgs-claude"].apiKey).toBe("CGS_CLIENT_SECRET");
   const cred = await reg["cgs-claude"].oauth.login();
   expect(reg["cgs-claude"].oauth.getApiKey(cred)).toBe(claudeKey("1"));
   expect(cred.refresh).toBe("s1");

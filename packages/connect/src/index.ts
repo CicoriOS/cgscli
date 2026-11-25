@@ -1,4 +1,5 @@
 export * from "./contracts.ts";
+export * from "./agent-config.ts";
 export * from "./profile.ts";
 export * from "./pty.ts";
 export * from "./tsp-host.ts";

@@ -30,5 +30,5 @@ exec docker run --rm -it --network host \
   ${CGS_BASE_URL:+-e CGS_BASE_URL="$CGS_BASE_URL"} \
   -w /tmp --entrypoint sh cgscli-build -c '
     mkdir -p /home/t/.cgs/agent
-    [ -f /home/t/.cgs/agent/config.yml ] || printf "extensions:\n  - /cgscli/plugin/omp-extension/index.ts\n" > /home/t/.cgs/agent/config.yml
+    PI_CODING_AGENT_DIR=/home/t/.cgs/agent bun /cgscli/scripts/seed-config.ts /cgscli/plugin/omp-extension/index.ts
     exec omp "$@"' sh "$@"
