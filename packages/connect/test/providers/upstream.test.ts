@@ -1,34 +1,23 @@
 import { expect, test } from "bun:test";
-import { CGSCONNECT_ORIGIN, type ChannelEvent, type Router } from "../../src/index.ts";
-import { createProviderHub } from "../../src/providers/index.ts";
-import { ChannelTracker, parseUpstream, refreshSession, usageLimitRewrite } from "../../src/providers/upstream.ts";
+import { CGSCONNECT_ORIGIN, type ChannelEvent, type IdentityEvent, type Router } from "../../src/index.ts";
+import { CHANNEL_PREFIX, createProviderHub, type ProviderHubImpl } from "../../src/providers/index.ts";
+import { ChannelTracker, parseUpstream, transientFailure } from "../../src/providers/upstream.ts";
 
-const claudeKey = (n: string) => `sk-ant-oat01-${n}`;
 const H = "x-cgs-upstream";
 
 function gateway(handler: (req: Request, n: number) => Response | Promise<Response>) {
-  const seen: { headers: Headers; body: string }[] = [];
+  const seen: { url: string; headers: Headers; body: string }[] = [];
   const r: Router = {
     async fetch(req) {
-      seen.push({ headers: req.headers, body: req.body ? await req.clone().text() : "" });
+      seen.push({ url: new URL(req.url).pathname, headers: req.headers, body: req.body ? await req.clone().text() : "" });
       return handler(req, seen.length);
     },
     status: () => ({ version: 0, mode: "direct" }), subscribe: () => () => {}, setTunnel() {}, clearTunnel() {},
   };
   return { r, seen };
 }
-
-function hubWith(r: Router, now?: () => number) {
-  const hub = createProviderHub({ router: r, now });
-  hub.pushCredentials([
-    { provider: "cgs-claude", id: "a", key: claudeKey("a") },
-    { provider: "cgs-claude", id: "b", key: claudeKey("b") },
-  ]);
-  return hub;
-}
-
-const call = (hub: ReturnType<typeof hubWith>, body = "{}", key = claudeKey("a")) =>
-  hub.fetch(new Request(`${CGSCONNECT_ORIGIN}/v1/messages`, { method: "POST", headers: { authorization: `Bearer ${key}`, "x-claude-code-session-id": "old-session" }, body }));
+const call = (hub: ProviderHubImpl, channel = "cgs-claude") =>
+  hub.fetch(new Request(`${CGSCONNECT_ORIGIN}${CHANNEL_PREFIX}${channel}/v1/messages`, { method: "POST", headers: { authorization: "Bearer client" }, body: "{}" }));
 
 test("parseUpstream: tolerates unknown keys and junk, rejects other versions", () => {
   expect(parseUpstream("v=1; family=anthropic; persona=claude-code; channel=11; from=9; switched=1; limited=1; rotate=0; refresh=0; reason=usage_limit; future=x")).toMatchObject({ channel: 11, from: 9, switched: true, limited: true, rotate: false, reason: "usage_limit" });
@@ -38,68 +27,70 @@ test("parseUpstream: tolerates unknown keys and junk, rejects other versions", (
   expect(parseUpstream("v=1; channel=abc; from=-3")).toMatchObject({ channel: undefined, from: undefined });
 });
 
-test("rotate=1 on a 503 becomes a usage-limit 429 in the provider's own wire format, so omp rotates", () => {
+test("rotate=1 failures become the provider's own transient error, never a usage limit", () => {
   const u = parseUpstream("v=1; rotate=1; reason=no_credential")!;
-  const claude = usageLimitRewrite("cgs-claude", 503, "no dedicated credential available", u)!;
-  expect(claude.status).toBe(429);
-  expect(JSON.parse(claude.body).error.type).toBe("rate_limit_error");
-  expect(claude.body.toLowerCase()).toContain("usage limit reached");
-  expect(usageLimitRewrite("cgs-codex", 503, "x", u)!.body).toContain("usage_limit_reached");
-  expect(usageLimitRewrite("cgs-antigravity", 503, "x", u)!.body).toContain("QUOTA_EXHAUSTED");
-  // Already rotating statuses, successes and rotate=0 are left alone.
-  expect(usageLimitRewrite("cgs-claude", 429, "x", u)).toBeNull();
-  expect(usageLimitRewrite("cgs-claude", 200, "x", u)).toBeNull();
-  expect(usageLimitRewrite("cgs-claude", 503, "x", parseUpstream("v=1; rotate=0")!)).toBeNull();
+  const claude = transientFailure("cgs-claude", 503, "no dedicated credential available", u)!;
+  expect(claude.status).toBe(529);
+  expect(JSON.parse(claude.body).error.type).toBe("overloaded_error");
+  expect(transientFailure("cgs-codex", 502, "x", u)!.status).toBe(503);
+  expect(JSON.parse(transientFailure("cgs-antigravity", 429, "x", u)!.body).error.status).toBe("UNAVAILABLE");
+  for (const c of ["cgs-claude", "cgs-codex", "cgs-antigravity"] as const) {
+    expect(transientFailure(c, 503, "x", u)!.body).not.toMatch(/usage.limit|QUOTA_EXHAUSTED|rate_limit/i);
+  }
+  expect(transientFailure("cgs-claude", 200, "x", u)).toBeNull();
+  expect(transientFailure("cgs-claude", 503, "x", parseUpstream("v=1; rotate=0")!)).toBeNull();
 });
 
-test("hub: rotate=1 failure is rewritten to 429, the slot is cooled for retry-after, and a rotation event fires", async () => {
-  const t = 1_000_000;
-  const gw = gateway(() => new Response("no dedicated credential available for tenant", { status: 503, headers: { [H]: "v=1; family=anthropic; channel=9; rotate=1; reason=no_credential; retry-after=60" } }));
-  const hub = hubWith(gw.r, () => t);
-  const events: string[] = [];
-  hub.onRotation((e) => events.push(`${e.from}->${e.to}:${e.reason}`));
+test("hub: rotate=1 failure is rewritten, and the channel's wire session id changes once", async () => {
+  const gw = gateway(() => new Response("no dedicated credential available", { status: 503, headers: { [H]: "v=1; channel=9; rotate=1; reason=no_credential" } }));
+  const hub = createProviderHub({ router: gw.r });
+  const events: IdentityEvent[] = [];
+  hub.onIdentity((e) => events.push(e));
+  const before = hub.sessionIdentity("cgs-claude", "sess-1");
+  expect(before).toBe("sess-1");
   const res = await call(hub);
-  expect(res.status).toBe(429);
-  expect(await res.text()).toContain("rate_limit_error");
-  expect(events).toEqual(["a->b:no_credential"]);
-  expect(hub.currentSlot("cgs-claude")!.id).toBe("b");
+  expect(res.status).toBe(529);
+  expect(events).toEqual([{ provider: "cgs-claude", epoch: 1, reason: "rotate: no_credential" }]);
+  const after = hub.sessionIdentity("cgs-claude", "sess-1");
+  expect(after).not.toBe("sess-1");
+  expect(after).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // Stable within an epoch, different per conversation and per channel.
+  expect(hub.sessionIdentity("cgs-claude", "sess-1")).toBe(after);
+  expect(hub.sessionIdentity("cgs-claude", "sess-2")).not.toBe(after);
+  expect(hub.sessionIdentity("cgs-codex", "sess-1")).toBe("sess-1");
 });
 
-test("hub: cooling by retry-after ends on time", async () => {
-  let t = 5_000;
-  const gw = gateway(() => new Response("x", { status: 200, headers: { [H]: "v=1; channel=9; rotate=1; retry-after=60" } }));
-  const hub = hubWith(gw.r, () => t);
-  await call(hub);
-  expect(hub.currentSlot("cgs-claude")!.id).toBe("b");
-  t += 59_000;
-  expect(hub.currentSlot("cgs-claude")!.id).toBe("b");
-  t += 2_000;
-  expect(hub.currentSlot("cgs-claude")!.id).toBe("a");
+test("hub: the path prefix names the channel and is stripped; nothing about the channel is sent upstream", async () => {
+  const gw = gateway(() => new Response("{}", { headers: { [H]: "v=1; channel=9; from=11; switched=1; refresh=1" } }));
+  const hub = createProviderHub({ router: gw.r });
+  await call(hub); await call(hub);
+  for (const s of gw.seen) {
+    expect(s.url).toBe("/v1/messages");
+    expect([...s.headers.keys()].filter((k) => /channel|cgs-/.test(k))).toEqual([]);
+    expect(s.body).not.toMatch(/channel/i);
+  }
+  expect((await hub.fetch(new Request(`${CGSCONNECT_ORIGIN}/v1/messages`))).status).toBe(404);
 });
 
-test("hub: a 2xx with limited=1 passes through untouched", async () => {
-  const gw = gateway(() => new Response("ok-body", { status: 200, headers: { [H]: "v=1; channel=9; from=11; switched=1; limited=1; rotate=0" } }));
-  const hub = hubWith(gw.r);
+test("hub: a successful response with limited=1 only is passed through, identity unchanged", async () => {
+  const gw = gateway(() => new Response("fine", { headers: { [H]: "v=1; channel=9; limited=1" } }));
+  const hub = createProviderHub({ router: gw.r });
   const res = await call(hub);
-  expect(res.status).toBe(200);
-  expect(await res.text()).toBe("ok-body");
-  expect(hub.currentSlot("cgs-claude")!.id).toBe("a");
+  expect(await res.text()).toBe("fine");
+  expect(hub.sessionIdentity("cgs-claude", "s")).toBe("s");
 });
 
-test("hub: without the header behaviour is the old one", async () => {
-  const gw = gateway(() => new Response(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Usage limit reached" } }), { status: 429 }));
-  const hub = hubWith(gw.r);
-  const events: string[] = [];
-  hub.onRotation((e) => events.push(e.reason));
-  const res = await call(hub);
-  expect(res.status).toBe(429);
-  expect(events).toEqual(["usage-limit"]);
+test("hub: without the header nothing changes", async () => {
+  const gw = gateway(() => new Response("{}", { status: 503 }));
+  const hub = createProviderHub({ router: gw.r });
+  expect((await call(hub)).status).toBe(503);
+  expect(hub.sessionIdentity("cgs-claude", "s")).toBe("s");
 });
 
 test("channel events: 11 -> 9 is announced with from/to, an unchanged channel is silent, lastChannel is read-only", async () => {
   let n = 0;
   const gw = gateway(() => new Response("{}", { headers: { [H]: ["v=1; channel=11", "v=1; channel=9; from=11; switched=1", "v=1; channel=9"][n++]! } }));
-  const hub = hubWith(gw.r);
+  const hub = createProviderHub({ router: gw.r });
   const evs: ChannelEvent[] = [];
   hub.onChannel((e) => evs.push(e));
   await call(hub); await call(hub); await call(hub);
@@ -108,41 +99,30 @@ test("channel events: 11 -> 9 is announced with from/to, an unchanged channel is
   expect("setChannel" in hub).toBe(false);
 });
 
-test("pinned channel refresh (refresh=1): event fires and the next request gets a fresh session id, device_id kept", async () => {
-  const meta = (s: string) => JSON.stringify({ metadata: { user_id: JSON.stringify({ device_id: "dev", account_uuid: "acc", session_id: s }) } });
+test("switched=1 and refresh=1 each move the identity on, once per signal", async () => {
   let n = 0;
-  const gw = gateway(() => new Response("{}", { headers: { [H]: n++ === 0 ? "v=1; channel=9; limited=1; refresh=1" : "v=1; channel=9" } }));
-  const hub = hubWith(gw.r);
-  const evs: ChannelEvent[] = [];
-  hub.onChannel((e) => evs.push(e));
-  await call(hub, meta("s1"));
-  expect(evs).toEqual([{ provider: "cgs-claude", kind: "refreshed", to: 9 }]);
-  await call(hub, meta("s1"));
-  const second = gw.seen[1]!;
-  const uid = JSON.parse(JSON.parse(second.body).metadata.user_id);
-  expect(uid.session_id).not.toBe("s1");
-  expect(uid).toMatchObject({ device_id: "dev", account_uuid: "acc" });
-  expect(second.headers.get("x-claude-code-session-id")).not.toBe("old-session");
-  // Only that one request is refreshed; the session id then stays stable.
-  await call(hub, meta("s1"));
-  expect(JSON.parse(JSON.parse(gw.seen[2]!.body).metadata.user_id).session_id).toBe("s1");
+  const gw = gateway(() => new Response("{}", { headers: { [H]: ["v=1; channel=9; from=11; switched=1", "v=1; channel=9", "v=1; channel=9; limited=1; refresh=1"][n++]! } }));
+  const hub = createProviderHub({ router: gw.r });
+  const events: IdentityEvent[] = [];
+  hub.onIdentity((e) => events.push(e));
+  await call(hub); await call(hub); await call(hub);
+  expect(events.map((e) => [e.epoch, e.reason])).toEqual([[1, "switched"], [2, "refresh"]]);
 });
 
-test("refreshSession leaves opaque user ids alone", () => {
-  const h = new Headers();
-  const body = JSON.stringify({ metadata: { user_id: "user_abc_account__session_xyz" } });
-  expect(refreshSession("cgs-claude", h, body)).toBe(body);
-  expect(refreshSession("cgs-codex", h, body)).toBe(body);
-});
-
-test("the client never names or hints a channel in what it sends", async () => {
-  const gw = gateway(() => new Response("{}", { headers: { [H]: "v=1; channel=9; from=11; switched=1; refresh=1" } }));
-  const hub = hubWith(gw.r);
-  await call(hub); await call(hub);
-  for (const s of gw.seen) {
-    expect([...s.headers.keys()].filter((k) => /channel|cgs-/.test(k))).toEqual([]);
-    expect(s.body).not.toMatch(/channel/i);
-  }
+test("in-flight requests that predate a switch do not switch again", async () => {
+  const gates = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  let n = 0;
+  const gw = gateway(async () => {
+    await gates[n++]!.promise;
+    return new Response("{}", { headers: { [H]: "v=1; channel=9; switched=1; from=11" } });
+  });
+  const hub = createProviderHub({ router: gw.r });
+  const events: IdentityEvent[] = [];
+  hub.onIdentity((e) => events.push(e));
+  const a = call(hub), b = call(hub);
+  gates.forEach((g) => g.resolve());
+  await Promise.all([a, b]);
+  expect(events).toHaveLength(1);
 });
 
 test("ChannelTracker: NewAPI's `from` wins over our own memory", () => {

@@ -80,13 +80,6 @@ function asManifest(v: unknown): ManifestProvider[] {
   return o.providers as ManifestProvider[];
 }
 
-/** The gateway slot currently preferred for `provider`; omp stores it as the login credential. */
-async function slotCredential(via: FetchFn, provider: string): Promise<OAuthCredentials> {
-  const s = (await getJson(via, `${CGSCONNECT_ORIGIN}/_cgsconnect/slot?provider=${encodeURIComponent(provider)}`)) as { id?: unknown; key?: unknown };
-  if (typeof s.id !== "string" || typeof s.key !== "string") throw new Error("cgsconnect slot malformed");
-  return { refresh: s.id, access: s.key, expires: Date.now() + LONG_LIVED_MS };
-}
-
 interface LoginCallbacks {
   onAuth(info: { url: string; instructions?: string }): void;
   onPrompt(p: { message: string }): Promise<string>;
@@ -127,8 +120,8 @@ type FetchFn = (input: string | URL | Request, init?: RequestInit) => Promise<Re
 
 /**
  * Registers the CGS channels served by cgsconnect; every request to cgsconnect goes through `via` (a direct call into
- * cgsconnect in production). Credentials: `apiKey` names an environment variable that holds the client credential (the
- * server issues no per-channel slots today); a stored slot login (`oauth`) takes precedence once the server issues them.
+ * cgsconnect in production). Credentials: `apiKey` names an environment variable that holds the client credential. The
+ * relay alone chooses the upstream account, so there are no per-channel credentials (ADR 0022).
  * Channels the manifest no longer has are unregistered.
  */
 export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<void> {
@@ -148,12 +141,6 @@ export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<
         maxTokens: m.maxTokens,
         cost: { input: m.price?.input ?? 0, output: m.price?.output ?? 0, cacheRead: m.price?.cacheRead ?? 0, cacheWrite: m.price?.cacheWrite ?? 0 },
       })),
-      oauth: {
-        name: "CGS",
-        login: () => slotCredential(via, p.channel),
-        refreshToken: () => slotCredential(via, p.channel),
-        getApiKey: (c: OAuthCredentials) => c.access,
-      },
     });
   }
 }
@@ -203,10 +190,14 @@ export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<s
   return ids;
 }
 
+const SESSION_IDENTITY_HOOK = Symbol.for("cgscli.sessionIdentity");
+
 export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   const home = process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs");
   const connect = createConnect({ upstream: candidatesFrom(), cloudflare: cloudflareFrom(), dataDir: path.join(home, "connect") });
   process.once("exit", () => connect.stop());
+  // omp patch P9 asks here for the wire session id of every cgs-* request (ADR 0022); a stock omp never asks.
+  Reflect.set(globalThis, SESSION_IDENTITY_HOOK, (provider: string, sessionId: string) => connect.hub.sessionIdentity(provider, sessionId));
   const agentDir = resolveAgentDir();
   const sync = (a: LoggedIn) => syncAccount({ pi, connect, agentDir }, a);
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.

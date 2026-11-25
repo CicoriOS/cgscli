@@ -2,7 +2,6 @@ import { afterEach, expect, test } from "bun:test";
 import { CGSCONNECT_ORIGIN, createConnect } from "../../src/index.ts";
 import { divert } from "../../../../plugin/omp-extension/index.ts";
 
-const claudeKey = "sk-ant-oat01-1";
 let undo = () => {};
 afterEach(() => undo());
 
@@ -12,13 +11,12 @@ test("provider traffic addressed to the virtual origin leaves through the router
     upstream: "https://api.example",
     directFetch: async (r) => { sent.push({ url: r.url, auth: r.headers.get("authorization") }); return new Response("ok"); },
   });
-  connect.hub.pushCredentials([{ provider: "cgs-claude", id: "s1", key: claudeKey }]);
   const other = globalThis.fetch;
   undo = divert((i, init) => connect.fetch(new Request(i, init)));
   try {
-    const res = await fetch(`${CGSCONNECT_ORIGIN}/v1/messages`, { method: "POST", body: "{}", headers: { authorization: `Bearer ${claudeKey}` } });
+    const res = await fetch(`${CGSCONNECT_ORIGIN}/_cgsconnect/c/cgs-claude/v1/messages`, { method: "POST", body: "{}", headers: { authorization: "Bearer client" } });
     expect(await res.text()).toBe("ok");
-    expect(sent).toEqual([{ url: "https://api.example/v1/messages", auth: `Bearer ${claudeKey}` }]);
+    expect(sent).toEqual([{ url: "https://api.example/v1/messages", auth: "Bearer client" }]);
     // not addressed to cgsconnect: must not reach the router
     const echo = Bun.serve({ port: 0, fetch: () => new Response("plain") });
     try { expect(await (await fetch(`http://127.0.0.1:${echo.port}/`)).text()).toBe("plain"); } finally { echo.stop(true); }

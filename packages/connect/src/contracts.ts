@@ -14,7 +14,8 @@ export interface ModelEntry {
   price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 export interface ModelManifest { providers: { id: string; channel: string; baseUrl: string; models: ModelEntry[] }[] }
-export interface RotationEvent { provider: string; from: string; to: string; reason: string }
+/** NewAPI moved on (`refresh`, `switched` or `rotate`): the channel's requests now carry a new wire session id. */
+export interface IdentityEvent { provider: string; epoch: number; reason: string }
 /** NewAPI reported a different channel than before (`from` -> `to` are channel ids). Observed, never requested. */
 export interface ChannelEvent { provider: string; kind: "switched" | "refreshed"; from?: number; to: number }
 /** Virtual origin of cgsconnect's HTTP surface. Nothing listens on it: the extension hands requests to it by direct call (service.ts). */
@@ -22,8 +23,9 @@ export const CGSCONNECT_ORIGIN = "http://cgsconnect.invalid";
 
 export interface ProviderHub {
   origin(): string;
-  pushCredentials(slots: unknown): void;
-  onRotation(cb: (ev: RotationEvent) => void): void;
+  /** The session id to put on the wire for `provider` under its current identity (omp patch P9; ADR 0022). */
+  sessionIdentity(provider: string, sessionId: string): string;
+  onIdentity(cb: (ev: IdentityEvent) => void): void;
   onChannel(cb: (ev: ChannelEvent) => void): void;
   /** Channel NewAPI last reported for a provider; read-only. */
   lastChannel(provider: string): number | undefined;

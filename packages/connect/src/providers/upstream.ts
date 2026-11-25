@@ -15,7 +15,6 @@ export interface Upstream {
   rotate: boolean;
   refresh: boolean;
   reason: string;
-  retryAfterSec?: number;
 }
 
 const num = (v: string | undefined): number | undefined => {
@@ -43,31 +42,24 @@ export function parseUpstream(h: string | null): Upstream | null {
     rotate: flag("rotate"),
     refresh: flag("refresh"),
     reason: kv.get("reason") ?? "none",
-    retryAfterSec: num(kv.get("retry-after")),
   };
 }
 
-/** Default cooldown when NewAPI says the account is exhausted but gives no time. */
-export const DEFAULT_COOLDOWN_SEC = 30 * 60;
-
 /**
- * NewAPI gave up on an exhausted account (`rotate=1`) with a status omp would not treat as a usage limit (503, 5xx,
- * 401 from an empty pool...). Rewrite it into the usage-limit answer of the provider's own wire format, so omp's own
- * rotation runs: next credential slot, new account identity (`device_id`), fresh session id. 429/402 already rotate.
- * Only the failure is rewritten; a 2xx is never touched (it cannot make omp refresh, which is stated in the docs).
+ * NewAPI gave up on the account that served a request (`rotate=1`) and the request failed. Answer with the provider's
+ * own transient error instead, so omp's ordinary retry sends it again, now under the new session identity
+ * (ADR 0022). Deliberately not a usage limit: omp would block its only credential. A success is never touched.
  */
-export function usageLimitRewrite(provider: Channel, status: number, original: string, u: Upstream): { status: number; body: string } | null {
-  if (!u.rotate || status < 400 || status === 429 || status === 402) return null;
+export function transientFailure(provider: Channel, status: number, original: string, u: Upstream): { status: number; body: string } | null {
+  if (!u.rotate || status < 400) return null;
   const detail = `${original.slice(0, 300)} (CGS: ${u.reason}, upstream status ${status})`;
   switch (provider) {
     case "cgs-claude":
-      return { status: 429, body: JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: `Usage limit reached: ${detail}` } }) };
-    case "cgs-codex":
-      return { status: 429, body: JSON.stringify({ error: { type: "usage_limit_reached", message: `The usage limit has been reached: ${detail}` } }) };
+      return { status: 529, body: JSON.stringify({ type: "error", error: { type: "overloaded_error", message: `Overloaded: ${detail}` } }) };
     case "cgs-antigravity":
-      return { status: 429, body: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", message: `QUOTA_EXHAUSTED: ${detail}` } }) };
+      return { status: 503, body: JSON.stringify({ error: { code: 503, status: "UNAVAILABLE", message: `The service is currently unavailable: ${detail}` } }) };
     default:
-      return { status: 429, body: JSON.stringify({ error: { type: "usage_limit_reached", code: "usage_limit_reached", message: `Usage limit reached: ${detail}` } }) };
+      return { status: 503, body: JSON.stringify({ error: { type: "server_error", code: "server_error", message: `The server had an error: ${detail}` } }) };
   }
 }
 
@@ -86,27 +78,4 @@ export class ChannelTracker {
     const from = u.switched && u.from !== undefined ? u.from : prev ?? null;
     return from !== null && from !== u.channel ? { provider: p, from, to: u.channel } : null;
   }
-}
-
-/**
- * A new session identity for the next request of `provider` (Claude Code's `/new`): a fresh session id, with the
- * account-bound `device_id` / `account_uuid` kept as omp derived them (see omp's rebindAnthropicMetadataUserId).
- */
-export function refreshSession(provider: Channel, headers: Headers, body: string | null, id: () => string = () => crypto.randomUUID()): string | null {
-  if (provider !== "cgs-claude") return body;
-  const fresh = id();
-  if (headers.has("x-claude-code-session-id")) headers.set("x-claude-code-session-id", fresh);
-  if (body === null) return body;
-  let j: unknown;
-  try { j = JSON.parse(body); } catch { return body; }
-  if (!j || typeof j !== "object") return body;
-  const meta = (j as Record<string, unknown>).metadata;
-  const uid = meta && typeof meta === "object" ? (meta as Record<string, unknown>).user_id : undefined;
-  if (typeof uid !== "string") return body;
-  let parsed: unknown;
-  try { parsed = JSON.parse(uid); } catch { return body; } // opaque ids are a real client's own: leave them
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || typeof (parsed as Record<string, unknown>).session_id !== "string") return body;
-  (parsed as Record<string, unknown>).session_id = fresh;
-  (meta as Record<string, unknown>).user_id = JSON.stringify(parsed);
-  return JSON.stringify(j);
 }

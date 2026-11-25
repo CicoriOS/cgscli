@@ -1,5 +1,5 @@
 import { displayName } from "./display-name.ts";
-// Channel classification, slot credential shapes and rotation-notice detection (docs: cgsconnect/providers.md, ADR 0005).
+// Channel classification, model manifest and the channel path prefix (docs: cgsconnect/providers.md, ADR 0021, ADR 0022).
 import type { ModelEntry, ModelManifest } from "../contracts.ts";
 
 export const CHANNELS = ["cgs-claude", "cgs-antigravity", "cgs-codex", "cgs-openai"] as const;
@@ -54,57 +54,21 @@ export function buildManifest(localBase: string, modelIds: string[], pricing: Re
     by.set(ch, list);
   }
   return {
-    providers: CHANNELS.filter((c) => by.has(c)).map((c) => ({ id: c, channel: c, baseUrl: `${localBase}${CHANNEL_API[c].pathSuffix}`, models: by.get(c)! })),
+    providers: CHANNELS.filter((c) => by.has(c)).map((c) => ({ id: c, channel: c, baseUrl: `${localBase}${CHANNEL_PREFIX}${c}${CHANNEL_API[c].pathSuffix}`, models: by.get(c)! })),
   };
 }
 
-// ---- slot credential shapes (gateway-issued) -------------------------------------------------------------------
+// ---- which channel a request is for ----------------------------------------------------------------------------
 
-export interface Slot { provider: Channel; id: string; key: string }
+/** Path prefix of a channel's `baseUrl` on the local origin. The hub reads the channel from it and forwards without it. */
+export const CHANNEL_PREFIX = "/_cgsconnect/c/";
 
-function jwtClaims(key: string): Record<string, unknown> | null {
-  const parts = key.split(".");
-  if (parts.length !== 3) return null;
-  try { return JSON.parse(Buffer.from(parts[1]!, "base64url").toString()); } catch { return null; }
-}
-
-/** Returns an error message, or null when the key has the shape omp's subscription handling needs. */
-export function slotShapeError(provider: Channel, key: string): string | null {
-  if (provider === "cgs-claude") return key.includes("sk-ant-oat") ? null : "Claude key must contain sk-ant-oat";
-  if (provider === "cgs-codex") {
-    const claims = jwtClaims(key);
-    const auth = claims?.["https://api.openai.com/auth"];
-    const acct = auth && typeof auth === "object" ? (auth as Record<string, unknown>).chatgpt_account_id : undefined;
-    return typeof acct === "string" && acct ? null : "Codex key must be a JWT with chatgpt_account_id";
-  }
-  if (provider === "cgs-antigravity") {
-    try {
-      const j: unknown = JSON.parse(key);
-      const o = j && typeof j === "object" ? (j as Record<string, unknown>) : {};
-      return typeof o.token === "string" && o.token && typeof o.projectId === "string" && o.projectId ? null : "Antigravity key needs token and projectId";
-    } catch { return "Antigravity key must be a JSON envelope"; }
-  }
-  return null;
-}
-
-/** The secret a request carries for a slot (Antigravity sends the envelope's token). */
-export function slotSecret(s: Slot): string {
-  if (s.provider !== "cgs-antigravity") return s.key;
-  const j: unknown = JSON.parse(s.key);
-  return String((j as Record<string, unknown>).token);
-}
-
-// ---- rotation notices ------------------------------------------------------------------------------------------
-
-/**
- * Whether an upstream error response is a quota-exhausted notice that makes omp rotate (and not a rolling rate limit,
- * which does not). Pure; applied by the proxy to non-success responses. Wording follows providers.md and omp's
- * error/rate-limit.ts classification at @76b7d84.
- */
-export function isRotationNotice(provider: Channel, status: number, body: string): boolean {
-  const b = body.toLowerCase();
-  if (provider === "cgs-codex") return status === 429 && b.includes("usage_limit_reached");
-  if (provider === "cgs-antigravity") return status === 429 && b.includes("quota_exhausted");
-  if (provider === "cgs-claude") return (status === 429 || status === 402) && (b.includes("usage limit reached") || b.includes("insufficient quota"));
-  return false;
+/** The channel and the upstream path of a request path under a channel prefix; null for any other path. */
+export function channelOfPath(pathname: string): { channel: Channel; rest: string } | null {
+  if (!pathname.startsWith(CHANNEL_PREFIX)) return null;
+  const tail = pathname.slice(CHANNEL_PREFIX.length);
+  const slash = tail.indexOf("/");
+  const name = slash < 0 ? tail : tail.slice(0, slash);
+  const channel = CHANNELS.find((c) => c === name);
+  return channel ? { channel, rest: slash < 0 ? "/" : tail.slice(slash) } : null;
 }

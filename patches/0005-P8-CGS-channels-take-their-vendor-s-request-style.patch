@@ -1,0 +1,206 @@
+From eb0b4a49354ad3602d3260e68d119a834de24182 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 21:38:31 +0800
+Subject: [PATCH 5/5] P8: CGS channels take their vendor's request style
+
+The CGS channels speak their vendor's own wire, but omp keys vendor rules on
+the provider id, so cgs-antigravity and cgs-codex fell back to the generic
+wire of their api:
+
+- cgs-antigravity resolves under google-antigravity's rules (Gemini needs the
+  skip-thought-signature sentinel on the first function call) and runs the
+  Antigravity request path: envelope, VALIDATED tool mode, client headers.
+  The updater-manifest lookup stays with the official provider so a relay-bound
+  channel does not reach past its gateway.
+- cgs-codex borrows only apply-patch-tool-type from openai-codex: the freeform
+  apply_patch tool. Codex's dollar prices and windows are not taken.
+- cgs-claude already gets Claude Code's shape from its api; cgs-openai
+  (deepseek and others) has no vendor style.
+---
+ .../ai/src/providers/google-gemini-cli.ts     |  7 ++-
+ packages/catalog/src/compat/cgs-style.ts      | 28 +++++++++++
+ packages/catalog/src/compat/resolve.ts        | 21 ++++++--
+ packages/catalog/test/cgs-style.test.ts       | 48 +++++++++++++++++++
+ 4 files changed, 99 insertions(+), 5 deletions(-)
+ create mode 100644 packages/catalog/src/compat/cgs-style.ts
+ create mode 100644 packages/catalog/test/cgs-style.test.ts
+
+diff --git a/packages/ai/src/providers/google-gemini-cli.ts b/packages/ai/src/providers/google-gemini-cli.ts
+index 8cedefe..5576da7 100644
+--- a/packages/ai/src/providers/google-gemini-cli.ts
++++ b/packages/ai/src/providers/google-gemini-cli.ts
+@@ -7,6 +7,7 @@ import { scheduler } from "node:timers/promises";
+ import { type } from "@oh-my-pi/omptype";
+ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
+ import { isReviewedTierVariantWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
++import { isAntigravityProvider } from "@oh-my-pi/pi-catalog/compat/cgs-style";
+ import {
+ 	ensureAntigravityVersion,
+ 	getAntigravityHeaders,
+@@ -524,7 +525,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
+ 				);
+ 			}
+ 
+-			const isAntigravity = model.provider === "google-antigravity";
++			const isAntigravity = isAntigravityProvider(model.provider);
+ 			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
+ 			const { accessToken, projectId } = parsedCredentials;
+ 			// AuthStorage already refreshed credentials before threading them
+@@ -607,7 +608,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
+ 			}
+ 			// The backend gates newer models on the client version; a process that
+ 			// skipped discovery (fresh model cache) must still send the current one.
+-			if (isAntigravity) await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
++			// Only the official host asks Google's updater for the client version: a relay-bound channel keeps the
++			// pinned fallback instead of reaching past its gateway.
++			if (model.provider === "google-antigravity") await ensureAntigravityVersion(options?.fetch ?? fetch, options?.signal);
+ 			// Antigravity mirrors the native Go client: no `Accept`, gzip only, and
+ 			// no Claude-thinking beta on Claude 5.x (the compat flag scopes it).
+ 			const requestHeaders = {
+diff --git a/packages/catalog/src/compat/cgs-style.ts b/packages/catalog/src/compat/cgs-style.ts
+new file mode 100644
+index 0000000..d39f6e0
+--- /dev/null
++++ b/packages/catalog/src/compat/cgs-style.ts
+@@ -0,0 +1,28 @@
++// CGS channels (cgscli patch P8). A CGS channel speaks its vendor's own wire (Claude Code, Codex, Antigravity), but
++// omp keys the vendor's rules on the provider id, so `cgs-antigravity` / `cgs-codex` would fall back to the generic
++// wire of their api. These tables say which vendor rules a CGS channel borrows. Claude needs none: an
++// `anthropic-messages` provider already gets Claude Code's request shape from its api (custom-models.ts).
++
++export const CGS_ANTIGRAVITY_PROVIDER = "cgs-antigravity";
++
++/** Providers that speak Antigravity's Cloud Code Assist wire (request envelope, tool mode, thought-signature rules). */
++export function isAntigravityProvider(provider: string): boolean {
++	return provider === "google-antigravity" || provider === CGS_ANTIGRAVITY_PROVIDER;
++}
++
++/**
++ * The provider whose whole rule set (compat, wire and catalog axes) a provider resolves under. Antigravity's rules
++ * carry no prices or limits, so `cgs-antigravity` can take them as they are.
++ */
++export function ruleHostOf(provider: string): string {
++	return provider === CGS_ANTIGRAVITY_PROVIDER ? "google-antigravity" : provider;
++}
++
++/**
++ * Catalog axes a provider borrows from another provider's rules, and nothing else. `openai-codex` also carries the
++ * catalog's dollar prices, context windows and service-tier costs; a CGS channel prices and sizes its models itself.
++ */
++export const BORROWED_AXES: Readonly<Record<string, { host: string; axes: readonly string[] }>> = {
++	// Codex's freeform `apply_patch` tool: a custom tool with a grammar instead of a function tool called `edit`.
++	"cgs-codex": { host: "openai-codex", axes: ["applyPatchToolType"] },
++};
+diff --git a/packages/catalog/src/compat/resolve.ts b/packages/catalog/src/compat/resolve.ts
+index cbdd48a..7dd29f3 100644
+--- a/packages/catalog/src/compat/resolve.ts
++++ b/packages/catalog/src/compat/resolve.ts
+@@ -43,6 +43,7 @@ import {
+ import { applyCompatOverrides } from "./apply";
+ import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
+ import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
++import { BORROWED_AXES, ruleHostOf } from "./cgs-style";
+ import { compareRevision, parseRevision, type Revision } from "./revision";
+ import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
+ import type { ModelIdentity, RequestPolicy, ResolvedAxes, ResolveTarget } from "./types";
+@@ -1331,10 +1332,24 @@ function fillExplicitThinking<TApi extends Api>(
+ // Entry
+ // ---------------------------------------------------------------------------
+ 
++/**
++ * Cascade resolution plus the catalog axes a CGS channel borrows from its vendor's provider (cgs-style.ts): the
++ * donor's value replaces the channel's own only for those axes.
++ */
++function resolveStyled(target: ResolveTarget): ResolvedAxes {
++	const axes = resolveCascade(target);
++	const borrowed = BORROWED_AXES[target.provider];
++	if (borrowed === undefined) return axes;
++	const donor = resolveCascade({ ...target, provider: borrowed.host }).catalog;
++	const catalog = { ...axes.catalog };
++	for (const key of borrowed.axes) if (key in donor) catalog[key] = donor[key];
++	return { ...axes, catalog };
++}
++
+ function buildResolveTarget(
+ 	spec: CatalogPolicyInputs,
+ 	identity: ModelIdentity,
+-	providerType = spec.providerType ?? spec.provider,
++	providerType = spec.providerType ?? ruleHostOf(spec.provider),
+ ): ResolveTarget {
+ 	const target: ResolveTarget = {
+ 		provider: providerType,
+@@ -1367,7 +1382,7 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
+ export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
+ 	const target = buildResolveTarget(spec, resolveIdentity(spec));
+ 	target.upstream = route?.upstream;
+-	return resolveCascade(target).catalog;
++	return resolveStyled(target).catalog;
+ }
+ 
+ /**
+@@ -1384,7 +1399,7 @@ export function resolveModelPolicy(input: ModelSpec<Api>, route?: ResolveRoute):
+ 	const facts = new IdentityFacts(identity);
+ 	const target = buildResolveTarget(spec, identity);
+ 	target.upstream = route?.upstream;
+-	const axes = resolveCascade(target);
++	const axes = resolveStyled(target);
+ 	let compat: CompatOf<Api>;
+ 	if (specUsesApi(spec, "openrouter")) {
+ 		const chat = resolveOpenAICompletionsPolicy(spec, facts, axes);
+diff --git a/packages/catalog/test/cgs-style.test.ts b/packages/catalog/test/cgs-style.test.ts
+new file mode 100644
+index 0000000..46184fd
+--- /dev/null
++++ b/packages/catalog/test/cgs-style.test.ts
+@@ -0,0 +1,48 @@
++import { describe, expect, it } from "bun:test";
++import { buildModel } from "../src/build";
++import { isAntigravityProvider } from "../src/compat/cgs-style";
++import type { Api, Model, ModelSpec } from "../src/types";
++
++const cost = { input: 1.2, output: 6, cacheRead: 0.12, cacheWrite: 0 };
++
++function channelModel(provider: string, api: Api, id: string): Model<Api> {
++	return buildModel({
++		id, name: id, provider, api, baseUrl: "http://cgsconnect.invalid", reasoning: true, input: ["text"],
++		cost, contextWindow: 200_000, maxTokens: 32_000,
++	} as unknown as ModelSpec<Api>);
++}
++
++describe("CGS channels take their vendor's request style (cgscli patch P8)", () => {
++	it("cgs-antigravity resolves under Antigravity's rules: Gemini wire facts apply, prices and limits stay the channel's own", () => {
++		const m = channelModel("cgs-antigravity", "google-gemini-cli", "gemini-3.8-flash");
++		expect(m.compat).toMatchObject({
++			requiresSkipThoughtSignatureOnFirstFunctionCall: true,
++			flashStreamLeakWorkaround: true,
++			streamFirstEventTimeoutMs: 60_000,
++		});
++		expect(m.cost).toEqual(cost);
++		expect([m.contextWindow, m.maxTokens]).toEqual([200_000, 32_000]);
++		expect(isAntigravityProvider("cgs-antigravity")).toBe(true);
++		expect(isAntigravityProvider("google-antigravity")).toBe(true);
++		expect(isAntigravityProvider("google")).toBe(false);
++	});
++
++	it("cgs-codex borrows Codex's freeform apply_patch and nothing else: Codex's dollar prices and windows never replace the channel's", () => {
++		const m = channelModel("cgs-codex", "openai-codex-responses", "gpt-6-astra");
++		expect(m.applyPatchToolType).toBe("freeform");
++		expect(m.cost).toEqual(cost);
++		expect([m.contextWindow, m.maxTokens]).toEqual([200_000, 32_000]);
++		expect(m.serviceTierCost).toBeUndefined();
++	});
++
++	it("Claude and the generic channel are left alone", () => {
++		const claude = channelModel("cgs-claude", "anthropic-messages", "claude-haiku-5-5");
++		expect(claude.cost.input).toBe(1.2);
++		expect(claude.contextWindow).toBe(200_000);
++		expect(claude.applyPatchToolType).toBeUndefined();
++		const deepseek = channelModel("cgs-openai", "openai-completions", "deepseek-v4.1-flash");
++		expect(deepseek.cost).toEqual(cost);
++		expect(deepseek.applyPatchToolType).toBeUndefined();
++		expect(deepseek.compat).not.toHaveProperty("requiresSkipThoughtSignatureOnFirstFunctionCall", true);
++	});
++});
+-- 
+2.47.3
+

@@ -1,0 +1,201 @@
+From 291fc5fcbf12119adcb80f3a8167c9905c0cd342 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 21:48:02 +0800
+Subject: [PATCH 6/6] P9: CGS channels switch their session identity at runtime
+
+The relay picks the upstream account; the client's answer to "move on" is to
+look like a new conversation (Claude Code's /new) while the transcript stays.
+cgsconnect installs a resolver under Symbol.for("cgscli.sessionIdentity");
+streamDispatch maps the session id of every cgs-* request through it, so the
+main agent, subagents, compaction and side requests all follow. When a
+channel's wire id changes, the Claude message threads and other account-scoped
+records and the Antigravity agent/trajectory/session ids kept in that
+conversation's providerSessionState are cleared. Codex keys its WebSocket
+session and prompt cache on the session id, so it follows by itself.
+---
+ packages/ai/src/cgs-session.ts       | 68 +++++++++++++++++++++++++
+ packages/ai/src/stream.ts            |  3 +-
+ packages/ai/test/cgs-session.test.ts | 75 ++++++++++++++++++++++++++++
+ 3 files changed, 145 insertions(+), 1 deletion(-)
+ create mode 100644 packages/ai/src/cgs-session.ts
+ create mode 100644 packages/ai/test/cgs-session.test.ts
+
+diff --git a/packages/ai/src/cgs-session.ts b/packages/ai/src/cgs-session.ts
+new file mode 100644
+index 0000000..33c8a43
+--- /dev/null
++++ b/packages/ai/src/cgs-session.ts
+@@ -0,0 +1,68 @@
++// CGS channels (cgscli patch P9): the session identity a request carries toward the relay can be switched at runtime.
++//
++// The relay chooses the upstream account; the client's whole answer to "move on to another account" is to look like a
++// new conversation: a new wire session id (Claude Code's `/new`) while the transcript stays the old one. cgsconnect
++// (loaded in-process by the cgs extension) installs a resolver under a well-known symbol, so the extension needs no
++// import of omp internals; the resolver maps (provider, session id) to the id to put on the wire for the current
++// epoch. Every model call funnels through `streamDispatch`, so the main agent, subagents, compaction and side
++// requests all follow the same switch, each with its own `providerSessionState`.
++import { getAntigravityProviderSessionState } from "./providers/google-gemini-cli";
++import { resetAccountScopedProviderSessionState } from "./provider-session-state";
++import type { ProviderSessionState } from "./types";
++
++const IDENTITY_HOOK = Symbol.for("cgscli.sessionIdentity");
++type IdentityHook = (provider: string, sessionId: string) => string;
++
++const MARKER_PREFIX = "cgs-session-identity:";
++
++interface IdentityMarker extends ProviderSessionState {
++	wireSessionId: string;
++}
++
++interface IdentityOptions {
++	sessionId?: string;
++	providerSessionState?: Map<string, ProviderSessionState>;
++}
++
++/**
++ * What a channel remembers about the previous identity and must not carry into the next one: Claude's message-thread
++ * chains and the other account-scoped records omp itself forgets on an account switch, and the Antigravity
++ * agent/trajectory/session ids (conversation-scoped to omp, identity to the relay). `lastGoodEndpoint` is endpoint
++ * state and stays.
++ */
++function forgetPreviousIdentity(states: Map<string, ProviderSessionState>): void {
++	resetAccountScopedProviderSessionState(states);
++	const agy = getAntigravityProviderSessionState(states);
++	if (agy) {
++		agy.agentId = undefined;
++		agy.trajectoryId = undefined;
++		agy.sessionId = undefined;
++		agy.stepIndex = undefined;
++		agy.requestCount = undefined;
++		agy.lastExecutionId = undefined;
++	}
++}
++
++/**
++ * Options with the wire session id for `provider`'s current identity. A first sighting only records the id; a changed
++ * id clears what the previous identity left in `providerSessionState`. Providers other than `cgs-*` pass through.
++ */
++export function withCgsSessionIdentity<T extends IdentityOptions>(provider: string, options: T): T {
++	if (!provider.startsWith("cgs-") || options.sessionId === undefined) return options;
++	const hook = Reflect.get(globalThis, IDENTITY_HOOK);
++	if (typeof hook !== "function") return options;
++	const wire = (hook as IdentityHook)(provider, options.sessionId);
++	const states = options.providerSessionState;
++	if (states) {
++		const key = `${MARKER_PREFIX}${provider}`;
++		const marker = states.get(key) as IdentityMarker | undefined;
++		if (marker === undefined) {
++			const created: IdentityMarker = { close: () => {}, wireSessionId: wire };
++			states.set(key, created);
++		} else if (marker.wireSessionId !== wire) {
++			forgetPreviousIdentity(states);
++			marker.wireSessionId = wire;
++		}
++	}
++	return wire === options.sessionId ? options : { ...options, sessionId: wire };
++}
+diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
+index 0661e9d..ba25460 100644
+--- a/packages/ai/src/stream.ts
++++ b/packages/ai/src/stream.ts
+@@ -21,6 +21,7 @@ import {
+ } from "@oh-my-pi/pi-catalog/model-thinking";
+ import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
+ import { getCustomApi } from "./api-registry";
++import { withCgsSessionIdentity } from "./cgs-session";
+ import {
+ 	createAuthRetryKeyState,
+ 	isApiKeyResolver,
+@@ -910,7 +911,7 @@ function streamDispatch<TApi extends Api>(
+ 	assertProviderEnabled(model.provider);
+ 	const requestOptions = withSupportedSamplingParams(
+ 		model,
+-		withTransportFetch(model, (options || {}) as StreamOptions),
++		withTransportFetch(model, withCgsSessionIdentity(model.provider, (options || {}) as StreamOptions)),
+ 	) as OptionsForApi<TApi>;
+ 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
+ 
+diff --git a/packages/ai/test/cgs-session.test.ts b/packages/ai/test/cgs-session.test.ts
+new file mode 100644
+index 0000000..c07aa03
+--- /dev/null
++++ b/packages/ai/test/cgs-session.test.ts
+@@ -0,0 +1,75 @@
++import { afterEach, describe, expect, it } from "bun:test";
++import { withCgsSessionIdentity } from "../src/cgs-session";
++import { ANTHROPIC_PROVIDER_SESSION_STATE_KEY, anthropicProviderSessionStateKey } from "../src/providers/anthropic-state";
++import { getAntigravityProviderSessionState } from "../src/providers/google-gemini-cli";
++import type { ProviderSessionState } from "../src/types";
++
++const HOOK = Symbol.for("cgscli.sessionIdentity");
++type States = Map<string, ProviderSessionState>;
++
++/** The resolver cgsconnect installs: per channel epoch, a different wire id per base session. */
++function install(epochs: Record<string, number>): void {
++	Reflect.set(globalThis, HOOK, (provider: string, base: string) => ((epochs[provider] ?? 0) === 0 ? base : `${base}#${provider}#${epochs[provider]}`));
++}
++
++afterEach(() => {
++	Reflect.deleteProperty(globalThis, HOOK);
++});
++
++function claudeThreads(states: States): Map<string, unknown> {
++	const state = { close: () => {}, threads: new Map<string, unknown>([["t1", {}]]) };
++	states.set(anthropicProviderSessionStateKey("http://cgsconnect.invalid", "claude-haiku-5-5"), state);
++	return state.threads;
++}
++
++describe("CGS session identity switch (cgscli patch P9)", () => {
++	it("leaves other providers and a missing resolver alone", () => {
++		const options = { sessionId: "s1", providerSessionState: new Map() as States };
++		expect(withCgsSessionIdentity("cgs-claude", options)).toBe(options);
++		install({ anthropic: 3, "cgs-claude": 3 });
++		expect(withCgsSessionIdentity("anthropic", options)).toBe(options);
++	});
++
++	it("puts the channel's current wire id on the request, and keeps it while the epoch holds", () => {
++		const options = { sessionId: "s1", providerSessionState: new Map() as States };
++		install({});
++		expect(withCgsSessionIdentity("cgs-claude", options).sessionId).toBe("s1");
++		install({ "cgs-claude": 1 });
++		expect(withCgsSessionIdentity("cgs-claude", options).sessionId).toBe("s1#cgs-claude#1");
++		expect(withCgsSessionIdentity("cgs-claude", options).sessionId).toBe("s1#cgs-claude#1");
++		expect(withCgsSessionIdentity("cgs-codex", options).sessionId).toBe("s1");
++	});
++
++	it("a new identity clears what the old one left: Claude threads and Antigravity ids, never the endpoint", () => {
++		const states: States = new Map();
++		const threads = claudeThreads(states);
++		const agy = getAntigravityProviderSessionState(states)!;
++		Object.assign(agy, { lastGoodEndpoint: "http://e", agentId: "a", trajectoryId: "t", sessionId: "7", stepIndex: 4, requestCount: 2, lastExecutionId: "x" });
++		install({});
++		withCgsSessionIdentity("cgs-claude", { sessionId: "s1", providerSessionState: states });
++		expect(threads.size).toBe(1); // a first sighting only records
++		install({ "cgs-claude": 1 });
++		withCgsSessionIdentity("cgs-claude", { sessionId: "s1", providerSessionState: states });
++		expect(threads.size).toBe(0);
++		expect(agy).toMatchObject({ lastGoodEndpoint: "http://e", agentId: undefined, trajectoryId: undefined, sessionId: undefined, stepIndex: undefined, requestCount: undefined, lastExecutionId: undefined });
++		// later calls in the same epoch do not clear again
++		threads.set("t2", {});
++		withCgsSessionIdentity("cgs-claude", { sessionId: "s1", providerSessionState: states });
++		expect(threads.size).toBe(1);
++	});
++
++	it("the main agent and a subagent (own session id, own state map) both follow the switch", () => {
++		const main: States = new Map();
++		const sub: States = new Map();
++		const mainThreads = claudeThreads(main);
++		const subThreads = claudeThreads(sub);
++		install({});
++		withCgsSessionIdentity("cgs-claude", { sessionId: "main", providerSessionState: main });
++		withCgsSessionIdentity("cgs-claude", { sessionId: "sub", providerSessionState: sub });
++		install({ "cgs-claude": 1 });
++		expect(withCgsSessionIdentity("cgs-claude", { sessionId: "main", providerSessionState: main }).sessionId).toBe("main#cgs-claude#1");
++		expect(withCgsSessionIdentity("cgs-claude", { sessionId: "sub", providerSessionState: sub }).sessionId).toBe("sub#cgs-claude#1");
++		expect([mainThreads.size, subThreads.size]).toEqual([0, 0]);
++		expect(ANTHROPIC_PROVIDER_SESSION_STATE_KEY).toBe("anthropic-messages");
++	});
++});
+-- 
+2.47.3
+
