@@ -7,7 +7,7 @@
 | `packages/wire` | Message contract (`Duplex`, hello/welcome, message families), TSP APC framing, replay buffer |
 | `packages/connect` | cgsconnect: profile/isolation, pty + TSP host, sessions, protocol server, `router/` (API direct-first + relay tunnel), `providers/` (channels, slots, rotation, local proxy), `remote/` (E2E relay link), `components/` (components.lock, downloader, doctor) |
 | `plugin/omp-extension` | Pre-installed omp extension: CGS login provider (`/login`), subscription channels from cgsconnect's manifest, `/cgs-doctor` and `/cgs-update` |
-| `patches/` | Patch series for omp (MIT, see `patches/LICENSE`): `0001` P4 branding (CGS logo and wordmark, `CHANGELOG.cgs.md`, update gate); `0002` P5 builds `crates/shell` on Linux (`rusage_info_v4` is macOS-only); `0003` P6 lists the `cgs` login first |
+| `patches/` | Patch series for omp (MIT, see `patches/LICENSE`): `0001` P4 branding (CGS logo and wordmark, `CHANGELOG.cgs.md`, update gate); `0002` P5 builds `crates/shell` on Linux (`rusage_info_v4` is macOS-only); `0003` P6 lists the `cgs` login first; `0004` P7 yuan prices for `cgs-*` models, no omp-side cost for them (the relay bills), the `cny` usage unit, and "Cicori Good Service" as the provider name |
 | `scripts/` | `fetch-omp`, `replay-patches` (`git am --3way`), `patch-limits`, `update-check`, `lock-component` |
 | `omp.lock.json`, `components.lock` | Pinned omp commit; pinned third-party components (hashes are produced by `lock-component`, never typed) |
 
