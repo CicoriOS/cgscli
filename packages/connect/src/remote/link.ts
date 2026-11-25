@@ -71,7 +71,7 @@ export class SecureChannel implements Duplex {
 
 interface Peer { hs: Handshake; authorized: boolean; chan: SecureChannel | null; seq: number }
 
-export function createRemoteLink(o: RemoteLinkOptions): RemoteLink & { fingerprint(): string } {
+export function createRemoteLink(o: RemoteLinkOptions): RemoteLink & { fingerprint(): string; deviceId(): string } {
   const store = new IdentityStore(o.identityFile);
   const codes = new PairingCodes();
   const doFetch = o.fetch ?? fetch;
@@ -167,6 +167,7 @@ export function createRemoteLink(o: RemoteLinkOptions): RemoteLink & { fingerpri
 
   return {
     fingerprint: () => fingerprint(store.identity.keys.pub),
+    deviceId: () => store.identity.deviceId,
     async start() {
       const r = await doFetch(`${http}/api/devices`, {
         method: "POST", headers: { ...auth(), "content-type": "application/json" },
