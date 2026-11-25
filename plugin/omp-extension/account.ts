@@ -53,7 +53,7 @@ export function applyCredentialEnv(secret: string, env: NodeJS.ProcessEnv = proc
   env[ANTIGRAVITY_KEY_ENV] = JSON.stringify({ token: secret, projectId: ANTIGRAVITY_PROJECT });
 }
 
-type Via = (req: Request) => Promise<Response>;
+export type Via = (req: Request) => Promise<Response>;
 
 const headers = (secret: string) => ({ Authorization: `Bearer ${secret}`, Accept: "application/json" });
 

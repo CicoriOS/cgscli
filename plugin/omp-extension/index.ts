@@ -5,6 +5,7 @@ import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, fetchModelIds, fetchPricing, r
 import { deviceLogin } from "./login.ts";
 import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager, createConnect, currentPlatform, parseComponentsLock, resolveAgentDir, type ComponentManagerImpl, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
+import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
 // library (ADR 0014): provider traffic is handed to its router by direct call, so our providers leave through the
@@ -205,7 +206,9 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   process.once("exit", () => connect.stop());
   const agentDir = resolveAgentDir();
   const sync = (a: LoggedIn) => syncAccount({ pi, connect, agentDir }, a);
-  pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync) });
+  // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.
+  const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
+  pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
   registerComponentCommands(pi);
   registerRemoteCommands(pi);
   divert((i, init) => connect.fetch(new Request(i, init)));
