@@ -1,0 +1,10 @@
+{
+  "name": "@cgscli/omp-extension",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "index.ts",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "dependencies": { "@cgscli/connect": "workspace:*" },
+  "omp": { "extensions": ["./index.ts"] }
+}
