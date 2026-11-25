@@ -7,6 +7,7 @@ import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
+import { providerTransport } from "./provider-transport.ts";
 import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
 // library (ADR 0014): provider traffic is handed to its router by direct call, so our providers leave through the
@@ -153,8 +154,7 @@ export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<
  */
 export function divert(via: FetchFn): () => void {
   const orig = globalThis.fetch;
-  const url = (i: string | URL | Request) => (typeof i === "string" ? i : i instanceof URL ? i.href : i.url);
-  globalThis.fetch = Object.assign(((i: string | URL | Request, init?: RequestInit) => (url(i).startsWith(CGSCONNECT_ORIGIN) ? via(i, init) : orig(i, init))) as typeof fetch, orig);
+  globalThis.fetch = Object.assign(providerTransport(via, orig) as typeof fetch, orig);
   return () => { globalThis.fetch = orig; };
 }
 
