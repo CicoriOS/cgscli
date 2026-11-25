@@ -15,6 +15,8 @@ export interface ModelEntry {
 }
 export interface ModelManifest { providers: { id: string; channel: string; baseUrl: string; models: ModelEntry[] }[] }
 export interface RotationEvent { provider: string; from: string; to: string; reason: string }
+/** NewAPI reported a different channel than before (`from` -> `to` are channel ids). Observed, never requested. */
+export interface ChannelEvent { provider: string; kind: "switched" | "refreshed"; from?: number; to: number }
 /** Virtual origin of cgsconnect's HTTP surface. Nothing listens on it: the extension hands requests to it by direct call (service.ts). */
 export const CGSCONNECT_ORIGIN = "http://cgsconnect.invalid";
 
@@ -22,6 +24,9 @@ export interface ProviderHub {
   origin(): string;
   pushCredentials(slots: unknown): void;
   onRotation(cb: (ev: RotationEvent) => void): void;
+  onChannel(cb: (ev: ChannelEvent) => void): void;
+  /** Channel NewAPI last reported for a provider; read-only. */
+  lastChannel(provider: string): number | undefined;
   manifest(): ModelManifest;
 }
 
