@@ -130,3 +130,34 @@ test("ChannelTracker: NewAPI's `from` wins over our own memory", () => {
   expect(t.observe("cgs-claude", parseUpstream("v=1; channel=5")!)).toBeNull();
   expect(t.observe("cgs-claude", parseUpstream("v=1; channel=9; from=11; switched=1")!)).toEqual({ provider: "cgs-claude", from: 11, to: 9 });
 });
+
+test("hub: Claude requests get a full metadata.user_id, and device_id changes with the epoch, not with the conversation", async () => {
+  let next = "v=1; channel=9";
+  const gw = gateway(() => new Response("{}", { headers: { [H]: next } }));
+  const hub = createProviderHub({ router: gw.r, deviceSeed: "seed" });
+  const send = (session: string) => hub.fetch(new Request(`${CGSCONNECT_ORIGIN}${CHANNEL_PREFIX}cgs-claude/v1/messages?beta=true`, {
+    method: "POST", body: JSON.stringify({ model: "m", metadata: { user_id: JSON.stringify({ session_id: session }) } }),
+  }));
+  const userId = (n: number) => JSON.parse(JSON.parse(gw.seen[n]!.body).metadata.user_id) as Record<string, string>;
+
+  await send("s1"); await send("s2");
+  expect(Object.keys(userId(0))).toEqual(["device_id", "account_uuid", "session_id"]);
+  expect(userId(0)).toMatchObject({ account_uuid: "", session_id: "s1" });
+  expect(userId(0).device_id).toMatch(/^[0-9a-f]{64}$/);
+  expect(userId(1).device_id).toBe(userId(0).device_id);
+  expect(JSON.parse(gw.seen[0]!.body).model).toBe("m");
+
+  next = "v=1; channel=9; rotate=1";
+  await send("s1");
+  next = "v=1; channel=9";
+  await send("s1");
+  expect(userId(3).device_id).not.toBe(userId(0).device_id);
+});
+
+test("hub: bodies that are not Claude messages pass through untouched", async () => {
+  const gw = gateway(() => new Response("{}"));
+  const hub = createProviderHub({ router: gw.r });
+  await hub.fetch(new Request(`${CGSCONNECT_ORIGIN}${CHANNEL_PREFIX}cgs-claude/v1/messages`, { method: "POST", body: "not json" }));
+  await hub.fetch(new Request(`${CGSCONNECT_ORIGIN}${CHANNEL_PREFIX}cgs-codex/v1/codex/responses`, { method: "POST", body: '{"a":1}' }));
+  expect(gw.seen.map((s) => s.body)).toEqual(["not json", '{"a":1}']);
+});

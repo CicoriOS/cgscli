@@ -2,15 +2,17 @@
 // the session identity epoch of each channel (ADR 0022). NewAPI alone chooses the upstream account; when its response
 // says it moved on (`refresh`, `switched`, `rotate`), the client answers by looking like a new conversation: the next
 // requests of that channel carry a new wire session id (omp patch P9 asks `sessionIdentity` for it).
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { CGSCONNECT_ORIGIN, type ChannelEvent, type IdentityEvent, type ModelManifest, type ProviderHub, type Router } from "../contracts.ts";
-import { buildManifest, channelOfPath, type Channel, type SitePrice } from "./channels.ts";
+import { buildManifest, CHANNEL_API, channelOfPath, type Channel, type SitePrice } from "./channels.ts";
 import { ChannelTracker, parseUpstream, transientFailure, UPSTREAM_HEADER, type Upstream } from "./upstream.ts";
 
 export interface ProviderHubOptions {
   router: Router;
   models?: string[];
   pricing?: Record<string, SitePrice>;
+  /** Secret of this machine; `device_id` is derived from it. Random per process when omitted. */
+  deviceSeed?: string;
 }
 
 export interface ProviderHubImpl extends ProviderHub {
@@ -30,7 +32,27 @@ function wireSessionId(sessionId: string, provider: string, epoch: number): stri
   return `${x.slice(0, 8)}-${x.slice(8, 12)}-${x.slice(12, 16)}-${x.slice(16, 20)}-${x.slice(20, 32)}`;
 }
 
+/** Claude Code's `metadata.user_id` is a JSON string `{device_id, account_uuid, session_id}`; with an API key `account_uuid` is empty. */
+function completeUserId(body: string, deviceId: string): string | undefined {
+  let message: { metadata?: { user_id?: unknown } } | null;
+  try { message = JSON.parse(body); } catch { return; }
+  if (!message || typeof message !== "object" || Array.isArray(message)) return;
+  let previous: Record<string, unknown> = {};
+  const raw = message.metadata?.user_id;
+  if (typeof raw === "string") {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) previous = parsed;
+    } catch { /* not ours to interpret */ }
+  }
+  const userId = JSON.stringify({ device_id: deviceId, account_uuid: typeof previous.account_uuid === "string" ? previous.account_uuid : "", ...(typeof previous.session_id === "string" ? { session_id: previous.session_id } : {}) });
+  message.metadata = { ...message.metadata, user_id: userId };
+  return JSON.stringify(message);
+}
+
 export function createProviderHub(o: ProviderHubOptions): ProviderHubImpl {
+  const seed = o.deviceSeed ?? randomBytes(32).toString("hex");
+  const deviceId = (provider: string, epoch: number) => createHash("sha256").update(`${seed}\0${provider}\0${epoch}`).digest("hex");
   const epochs = new Map<string, number>();
   const identityListeners: ((e: IdentityEvent) => void)[] = [];
   const channelListeners: ((e: ChannelEvent) => void)[] = [];
@@ -70,7 +92,12 @@ export function createProviderHub(o: ProviderHubOptions): ProviderHubImpl {
     if (!target) return new Response("not found", { status: 404 });
     const { channel, rest } = target;
     const startEpoch = epochOf(channel);
-    const upstream = await o.router.fetch(new Request(`http://local${rest}${u.search}`, { method: req.method, headers: req.headers, body: req.body, signal: req.signal, ...(req.body ? { duplex: "half" } : {}) } as RequestInit));
+    let body: BodyInit | null = req.body;
+    if (req.method === "POST" && rest === "/v1/messages" && CHANNEL_API[channel].api === "anthropic-messages") {
+      const text = await req.text();
+      body = completeUserId(text, deviceId(channel, startEpoch)) ?? text;
+    }
+    const upstream = await o.router.fetch(new Request(`http://local${rest}${u.search}`, { method: req.method, headers: req.headers, body, signal: req.signal, ...(body ? { duplex: "half" } : {}) } as RequestInit));
     const info = parseUpstream(upstream.headers.get(UPSTREAM_HEADER));
     if (info) observe(channel, info, startEpoch);
     if (info?.rotate && upstream.status >= 400) {
