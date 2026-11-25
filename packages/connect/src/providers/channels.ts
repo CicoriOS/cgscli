@@ -1,3 +1,4 @@
+import { displayName } from "./display-name.ts";
 // Channel classification, slot credential shapes and rotation-notice detection (docs: cgsconnect/providers.md, ADR 0005).
 import type { ModelEntry, ModelManifest } from "../contracts.ts";
 
@@ -49,7 +50,7 @@ export function buildManifest(localBase: string, modelIds: string[], pricing: Re
     const f = FAMILIES.find((x) => x.test.test(id)) ?? FALLBACK;
     const price = manifestPrice(pricing[id]);
     const list = by.get(ch) ?? [];
-    list.push({ id, name: id, contextWindow: f.contextWindow, maxTokens: f.maxTokens, reasoning: f.reasoning, ...(price ? { price } : {}) });
+    list.push({ id, name: displayName(id), contextWindow: f.contextWindow, maxTokens: f.maxTokens, reasoning: f.reasoning, ...(price ? { price } : {}) });
     by.set(ch, list);
   }
   return {
