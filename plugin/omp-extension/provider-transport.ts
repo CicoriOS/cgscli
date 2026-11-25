@@ -56,7 +56,8 @@ function toolNormalizer(request: unknown): ToolNormalizer | undefined {
       const mapped = exact.has(use.name) ? use.name : candidates.get(fold(use.name));
       if (!mapped) return false;
       const target = fold(mapped);
-      if (index !== undefined) targets.set(index, target);
+      // Only the file tools take arguments that need translating; every other tool's stream stays untouched.
+      if (index !== undefined && (target === "read" || target === "write" || target === "edit")) targets.set(index, target);
       let changed = false;
       if (use.name !== mapped) { use.name = mapped; changed = true; }
       const input = object(use.input);
@@ -75,10 +76,11 @@ function toolNormalizer(request: unknown): ToolNormalizer | undefined {
       try { input = JSON.parse(partial); } catch { return { changed: false, suppress: true }; }
       const parsed = object(input);
       if (!parsed) return { changed: false };
-      const changed = normalizeInput(parsed, target);
+      normalizeInput(parsed, target);
+      // Earlier chunks were withheld, so this event now carries the whole object even if nothing was renamed.
       delta.partial_json = JSON.stringify(parsed);
       partials.delete(index);
-      return { changed, suppress: false };
+      return { changed: true, suppress: false };
     },
   };
 }

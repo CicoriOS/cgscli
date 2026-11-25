@@ -84,6 +84,25 @@ test("SSE remains incremental, preserves unrelated frames, and replays with the 
   expect(bodies).toEqual([first, replay]);
 });
 
+test("streamed arguments arrive whole: shell input is untouched, path arguments survive chunking", async () => {
+  const sse = (index: number, name: string, chunks: string[]) =>
+    `data: ${JSON.stringify({ type: "content_block_start", index, content_block: { type: "tool_use", id: `t${index}`, name, input: {} } })}\n\n` +
+    chunks.map(partial_json => `data: ${JSON.stringify({ type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json } })}\n\n`).join("");
+  const wire = sse(0, "_bash", ['{"command": "pwd; ', 'ls -l"}']) + sse(1, "_write", ['{"path": "a.svg", ', '"content": "<svg/>"}']) + sse(2, "_write", ['{"file_path": "b.svg", "content"', ': "x"}']);
+  const transport = providerTransport(async () => new Response(wire, { headers: { "content-type": "text/event-stream" } }), unused);
+  const result = await transport(new Request(claude, messageInit({ tools: ["_bash", "_write"].map(name => ({ name })) })));
+  const args = new Map<number, string>();
+  for (const frame of (await result.text()).split("\n\n")) {
+    const data = frame.replace(/^data: /, "");
+    if (!data) continue;
+    const e = JSON.parse(data);
+    if (e.delta?.type === "input_json_delta") args.set(e.index, (args.get(e.index) ?? "") + e.delta.partial_json);
+  }
+  expect(JSON.parse(args.get(0)!)).toEqual({ command: "pwd; ls -l" });
+  expect(JSON.parse(args.get(1)!)).toEqual({ path: "a.svg", content: "<svg/>" });
+  expect(JSON.parse(args.get(2)!)).toEqual({ path: "b.svg", content: "x" });
+});
+
 test("only local Anthropic Messages POSTs opt in, without inspecting model names", async () => {
   const response = wireResponse([toolCall("Write")]);
   const fallback = new Response("external");
