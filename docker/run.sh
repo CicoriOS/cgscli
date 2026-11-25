@@ -5,10 +5,10 @@
 #      STATE=<volume> keeps ~/.cgs across runs.
 #
 # cgs keeps its state in ~/.cgs (PI_CONFIG_DIR) and never touches ~/.omp.
-# The terminal's identity variables are forwarded: omp only emits OSC 8 hyperlinks (Ctrl+click, copy link) on terminals
-# it recognises from them (TERM_PROGRAM, KITTY_WINDOW_ID, ...). Without them it falls back to a plain true-colour
-# profile with no hyperlinks, which is what a bare `-e TERM` container looks like. VTE terminals (GNOME Terminal,
-# Xfce Terminal) are not recognised at all: set PI_FORCE_HYPERLINKS=1 on the host to turn links on (passed through).
+# omp only emits OSC 8 hyperlinks (Ctrl+click, copy link) on terminals it recognises from identity variables
+# (TERM_PROGRAM, KITTY_WINDOW_ID, ...), which are forwarded below. VTE terminals (GNOME Terminal, Xfce Terminal) are
+# not recognised at all, and a bare `-e TERM` container looks like an unknown one, so links are forced on by default
+# (PI_FORCE_HYPERLINKS=1); a terminal without OSC 8 support ignores the sequence. PI_NO_HYPERLINKS=1 on the host wins.
 set -e
 OMP_BIN=${OMP_BIN:-/tmp/omp-build/packages/coding-agent/dist/omp}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -21,6 +21,7 @@ for v in TERM_PROGRAM TERM_PROGRAM_VERSION LC_TERMINAL KITTY_WINDOW_ID GHOSTTY_R
   eval "val=\${$v:-}"
   [ -n "$val" ] && TERM_ENV="$TERM_ENV -e $v=$val"
 done
+[ -z "${PI_FORCE_HYPERLINKS:-}" ] && [ -z "${PI_NO_HYPERLINKS:-}" ] && TERM_ENV="$TERM_ENV -e PI_FORCE_HYPERLINKS=1"
 # shellcheck disable=SC2086
 exec docker run --rm -it --network host \
   -v "$OMP_BIN":/usr/local/bin/omp:ro -v "$ROOT":/cgscli:ro \
