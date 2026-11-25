@@ -19,6 +19,8 @@ export interface Account {
   /** Last model ids / prices the server returned: registered at once on the next start, refreshed in the background. */
   models: string[];
   pricing: Record<string, SitePrice>;
+  /** The relay's display currency as last fetched: prices and amounts are in it. */
+  currency?: Currency;
 }
 
 export const credentialsPath = (agentDir: string) => path.join(agentDir, "cgs", "credentials.json");
@@ -36,6 +38,7 @@ export function readAccount(agentDir: string): Account | null {
     ...(typeof o.tier === "string" ? { tier: o.tier } : {}),
     models: Array.isArray(o.models) ? o.models.filter((m): m is string => typeof m === "string" && m !== "") : [],
     pricing,
+    ...(parseCurrency(o.currency) ? { currency: parseCurrency(o.currency)! } : {}),
   };
 }
 
@@ -51,6 +54,33 @@ export function applyCredentialEnv(secret: string, env: NodeJS.ProcessEnv = proc
   env[SECRET_ENV] = secret;
   // omp expects the Antigravity channel's credential as JSON {token, projectId}; the gateway ignores the project.
   env[ANTIGRAVITY_KEY_ENV] = JSON.stringify({ token: secret, projectId: ANTIGRAVITY_PROJECT });
+}
+
+/**
+ * The currency the relay shows amounts in (its console's display type): `code`, `symbol` (free text on a custom
+ * currency, an emoji included) and `prefix`, the text printed before an amount (a custom symbol is followed by a space).
+ */
+export interface Currency { code: string; symbol: string; prefix: string }
+
+/** Environment variable omp (patch P7) reads for the amount prefix of cgs-* models. */
+export const CURRENCY_ENV = "CGS_CURRENCY_PREFIX";
+
+const NAMED_CURRENCIES: Record<string, string> = { CNY: "¥", USD: "$" };
+
+/** `{ code, symbol, prefix }` of a pricing or usage payload; null when the server named no currency. */
+export function parseCurrency(v: unknown): Currency | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const code = typeof o.code === "string" ? o.code : typeof o.currency === "string" ? o.currency : "";
+  const symbol = (typeof o.symbol === "string" && o.symbol.trim()) || NAMED_CURRENCIES[code] || "";
+  if (!code && !symbol) return null;
+  const prefix = typeof o.prefix === "string" && o.prefix ? o.prefix : symbol || `${code} `;
+  return { code: code || symbol, symbol: symbol || code, prefix };
+}
+
+/** omp prints amounts of cgs-* models with this prefix; it is read at display time, so a change needs no restart. */
+export function applyCurrencyEnv(currency: Currency | null | undefined, env: NodeJS.ProcessEnv = process.env): void {
+  if (currency) env[CURRENCY_ENV] = currency.prefix;
 }
 
 export type Via = (req: Request) => Promise<Response>;
@@ -72,16 +102,20 @@ export async function fetchModelIds(via: Via, baseUrl: string, secret: string, s
   return ids;
 }
 
+export interface Pricing { models: Record<string, SitePrice>; currency: Currency | null }
+
 /**
- * GET <baseUrl>/api/device/pricing -> { model: { input, output, cache_read?, cache_write? } } in CNY per million tokens
- * (the site's real prices after the group ratio). Best effort: null on any failure, models then register unpriced.
+ * GET <baseUrl>/api/device/pricing -> { model: { input, output, cache_read?, cache_write? } } per million tokens in the
+ * relay's display currency (the site's real prices after the group ratio) and that currency. Best effort: null on any
+ * failure, models then register unpriced.
  */
-export async function fetchPricing(via: Via, baseUrl: string, secret: string, signal?: AbortSignal): Promise<Record<string, SitePrice> | null> {
+export async function fetchPricing(via: Via, baseUrl: string, secret: string, signal?: AbortSignal): Promise<Pricing | null> {
   try {
     const res = await via(new Request(`${baseUrl.replace(/\/+$/, "")}/api/device/pricing`, { headers: headers(secret), signal: signal ?? AbortSignal.timeout(10_000) }));
     if (!res.ok) return null;
-    const body = (await res.json()) as { success?: unknown; data?: { currency?: unknown; models?: unknown } };
-    if (body?.success !== true || body.data?.currency !== "CNY" || !body.data.models || typeof body.data.models !== "object") return null;
-    return body.data.models as Record<string, SitePrice>;
+    const body = (await res.json()) as { success?: unknown; data?: Record<string, unknown> };
+    const d = body?.data;
+    if (body?.success !== true || !d || !d.models || typeof d.models !== "object") return null;
+    return { models: d.models as Record<string, SitePrice>, currency: parseCurrency(d) };
   } catch { return null; }
 }

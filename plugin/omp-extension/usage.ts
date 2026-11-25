@@ -1,16 +1,19 @@
 // The /usage card of the CGS account, shaped like the New API wallet page: Current Balance, Total Usage and API Requests
 // (web/src/features/wallet/components/wallet-stats-card.tsx), plus the tier and what is left of each subscription, all from
-// GET /api/device/usage. Amounts are yuan; the server formats display strings, numbers here only drive fractions and status.
-// Registered as an omp UsageProvider on the login provider, so /usage shows one card for the account.
-import type { Via } from "./account.ts";
+// GET /api/device/usage. Amounts are in the relay's display currency (the one its console shows, see Currency); omp prints
+// them with the amount prefix the extension exports (patch P7, unit `currency`). Registered as an omp UsageProvider on the
+// login provider, so /usage shows one card for the account.
+import { applyCurrencyEnv, type Currency, parseCurrency, type Via } from "./account.ts";
 
 const RESET_LABEL: Record<string, string> = { daily: "Daily", weekly: "Weekly", monthly: "Monthly", custom: "Custom" };
 
 export interface DeviceUsage {
   tier: string;
   username: string;
-  /** `usedCny` / `requestCount` are absent on a server older than the wallet fields; their rows are then left out. */
-  balance: { cny: number; display: string; usedCny?: number; usedDisplay?: string; requestCount?: number };
+  /** The relay's display currency; null when the server names none (an older server). */
+  currency: Currency | null;
+  /** `usedAmount` / `requestCount` are absent on a server older than the wallet fields; their rows are then left out. */
+  balance: { amount: number; usedAmount?: number; requestCount?: number };
   subscriptions: {
     id: number; title: string; total: number; used: number; totalDisplay: string; usedDisplay: string;
     resetPeriod: string; nextResetAt: number; endTime: number;
@@ -22,22 +25,24 @@ const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const optNum = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 
+/** Servers before the display-currency fields only reported yuan (`cny`, `used_cny`); read those as yuan. */
+const LEGACY_YUAN: Currency = { code: "CNY", symbol: "¥", prefix: "¥" };
+
 /** The `data` object of a usage response, or null when it is not one. */
 export function parseDeviceUsage(data: unknown): DeviceUsage | null {
   if (!data || typeof data !== "object") return null;
   const d = data as Record<string, unknown>;
   const b = (d.balance && typeof d.balance === "object" ? d.balance : {}) as Record<string, unknown>;
-  const cny = num(b.cny);
-  const usedCny = optNum(b.used_cny);
+  const modern = optNum(b.amount) !== undefined;
+  const amount = modern ? optNum(b.amount)! : num(b.cny);
+  const usedAmount = optNum(modern ? b.used_amount : b.used_cny);
+  const requestCount = optNum(b.request_count);
   const subs = Array.isArray(d.subscriptions) ? d.subscriptions : [];
   return {
     tier: str(d.tier) || "free",
     username: str(d.username),
-    balance: {
-      cny, display: str(b.cny_display) || `¥${cny.toFixed(2)}`,
-      ...(usedCny !== undefined ? { usedCny, usedDisplay: str(b.used_cny_display) || `¥${usedCny.toFixed(2)}` } : {}),
-      ...(optNum(b.request_count) !== undefined ? { requestCount: optNum(b.request_count) } : {}),
-    },
+    currency: parseCurrency(d.currency) ?? (modern ? null : LEGACY_YUAN),
+    balance: { amount, ...(usedAmount !== undefined ? { usedAmount } : {}), ...(requestCount !== undefined ? { requestCount } : {}) },
     subscriptions: subs.filter((s) => s && typeof s === "object").map((raw) => {
       const s = raw as Record<string, unknown>;
       return {
@@ -62,11 +67,11 @@ export async function fetchDeviceUsage(via: Via, baseUrl: string, secret: string
 }
 
 // Minimal structural copies of omp's UsageReport (ai/src/usage.ts); the extension must not import omp internals.
-// `cny` is the unit patch P7 adds to omp (patches/0004).
+// `currency` is the unit patch P7 adds to omp (patches/0004).
 export interface CgsUsageLimit {
   id: string; label: string; scope: { provider: string; tier?: string };
   window?: { id: string; label: string; resetsAt?: number };
-  amount: { used?: number; limit?: number; remaining?: number; usedFraction?: number; remainingFraction?: number; unit: "credits" | "cny" | "requests" };
+  amount: { used?: number; limit?: number; remaining?: number; usedFraction?: number; remainingFraction?: number; unit: "credits" | "currency" | "requests" };
   status?: "ok" | "warning" | "exhausted" | "unknown"; notes?: string[];
 }
 export interface CgsUsageReport { provider: string; fetchedAt: number; limits: CgsUsageLimit[]; notes?: string[]; metadata?: Record<string, unknown> }
@@ -76,10 +81,10 @@ export function buildUsageReport(provider: string, u: DeviceUsage, now = Date.no
   const scope = { provider, tier: u.tier };
   const limits: CgsUsageLimit[] = [{
     id: "balance", label: "Current Balance", scope, notes: ["Remaining quota"],
-    amount: { remaining: u.balance.cny, unit: "cny" }, status: u.balance.cny > 0 ? "ok" : "exhausted",
+    amount: { remaining: u.balance.amount, unit: "currency" }, status: u.balance.amount > 0 ? "ok" : "exhausted",
   }];
-  if (u.balance.usedCny !== undefined) {
-    limits.push({ id: "total-usage", label: "Total Usage", scope, notes: ["Total consumed quota"], amount: { used: u.balance.usedCny, unit: "cny" }, status: "ok" });
+  if (u.balance.usedAmount !== undefined) {
+    limits.push({ id: "total-usage", label: "Total Usage", scope, notes: ["Total consumed quota"], amount: { used: u.balance.usedAmount, unit: "currency" }, status: "ok" });
   }
   if (u.balance.requestCount !== undefined) {
     limits.push({ id: "api-requests", label: "API Requests", scope, notes: ["Total requests made"], amount: { used: u.balance.requestCount, unit: "requests" }, status: "ok" });
@@ -99,7 +104,7 @@ export function buildUsageReport(provider: string, u: DeviceUsage, now = Date.no
   return {
     provider, fetchedAt: u.generatedAt > 0 ? u.generatedAt * 1000 : now, limits,
     notes: [`Account ${u.username || "-"} · Tier ${u.tier}`],
-    metadata: { currency: "CNY", balanceCny: u.balance.cny },
+    metadata: { currency: u.currency?.code ?? null, balance: u.balance.amount },
   };
 }
 
@@ -116,7 +121,10 @@ export function createUsageProvider(provider: string, via: Via, account: () => {
       const a = account();
       if (!a) return null;
       const u = await fetchDeviceUsage(via, a.baseUrl, a.clientSecret, params.signal);
-      return u ? buildUsageReport(provider, u) : null;
+      if (!u) return null;
+      // The amounts of this report are in the relay's currency; keep omp's prefix for them in step with it.
+      applyCurrencyEnv(u.currency);
+      return buildUsageReport(provider, u);
     },
   };
 }

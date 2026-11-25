@@ -1,0 +1,392 @@
+From 595ace6365bc00c69863067e5a8fbd83fdb41758 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 20:42:42 +0800
+Subject: [PATCH 4/4] P7: CGS channels bill in the API relay's currency
+
+Reason: CGS channels are billed by the API relay, in whatever currency the relay's console shows (yuan, dollars, or a custom symbol such as an emoji), not in dollars. The cgs extension reads that currency from the relay and exports the amount prefix in CGS_CURRENCY_PREFIX; omp prints it for cgs-* models in the model picker price column and the status line spend, and a new usage unit `currency` shows the relay wallet in it on /usage. omp's global stats (the stats database) record no cost for cgs-* (the relay has its own bill). The login and its four channels are shown as one provider name, Cicori Good Service. Every branch is new; other providers are unchanged.
+Upstream: none yet (CGS-specific provider prefix, not a candidate PR)
+Remove-when: the build no longer ships the cgs extension, or upstream supports per-provider currency, display names and externally billed providers
+---
+ packages/ai/src/usage.ts                      |  4 +-
+ packages/coding-agent/src/cgs-currency.ts     | 24 +++++++++
+ packages/coding-agent/src/cli/usage-cli.ts    |  3 ++
+ .../modes/controllers/command-controller.ts   |  5 +-
+ .../src/modes/interactive/status-line.ts      |  2 +
+ .../src/modes/view-model/chrome/format.ts     |  3 ++
+ .../view-model/overlays/model-browser.ts      |  5 +-
+ .../slash-commands/helpers/usage-amounts.ts   |  2 +
+ .../overlays/panels/usage-dashboard-model.ts  |  2 +
+ packages/coding-agent/src/ui/status/facts.ts  |  2 +
+ packages/coding-agent/src/ui/status/format.ts |  4 +-
+ .../coding-agent/src/ui/status/segments.ts    |  1 +
+ .../coding-agent/test/cgs-currency.test.ts    | 51 +++++++++++++++++++
+ packages/stats/src/db.ts                      |  2 +
+ packages/stats/test/cgs-cost.test.ts          | 40 +++++++++++++++
+ 15 files changed, 145 insertions(+), 5 deletions(-)
+ create mode 100644 packages/coding-agent/src/cgs-currency.ts
+ create mode 100644 packages/coding-agent/test/cgs-currency.test.ts
+ create mode 100644 packages/stats/test/cgs-cost.test.ts
+
+diff --git a/packages/ai/src/usage.ts b/packages/ai/src/usage.ts
+index 2d1633b..113bae3 100644
+--- a/packages/ai/src/usage.ts
++++ b/packages/ai/src/usage.ts
+@@ -6,7 +6,7 @@
+  */
+ import { type } from "@oh-my-pi/omptype";
+ import type { FetchImpl, Provider } from "./types";
+-export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
++export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "currency" | "minutes" | "bytes" | "unknown";
+ 
+ export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
+ 
+@@ -294,7 +294,7 @@ export interface ClientUsageSummary {
+ // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
+ 
+ export const usageUnitSchema = type(
+-	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
++	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'currency' | 'minutes' | 'bytes' | 'unknown'",
+ );
+ export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
+ 
+diff --git a/packages/coding-agent/src/cgs-currency.ts b/packages/coding-agent/src/cgs-currency.ts
+new file mode 100644
+index 0000000..520c913
+--- /dev/null
++++ b/packages/coding-agent/src/cgs-currency.ts
+@@ -0,0 +1,24 @@
++// CGS (cgscli patch P7): the CGS login and its channels (`cgs`, `cgs-claude`, ...) are billed by the API relay, in the
++// relay's own currency, which is whatever the relay's console is set to show (yuan, dollars, or a custom symbol of up
++// to 8 characters, an emoji included). The extension reads it from the relay and exports it here; omp has no currency
++// of its own to guess from.
++
++/**
++ * Environment variable the CGS extension sets to the text printed before an amount: the relay's symbol (`¥`, `$`,
++ * `HK$`, `🐱`), followed by a space when the relay's console prints one (a custom symbol).
++ */
++export const CGS_CURRENCY_ENV = "CGS_CURRENCY_PREFIX";
++
++export function isCgsProvider(provider: string): boolean {
++	return provider === "cgs" || provider.startsWith("cgs-");
++}
++
++/** The relay's amount prefix; `$` until the extension has learned it. */
++export function cgsCurrencyPrefix(): string {
++	return process.env[CGS_CURRENCY_ENV] || "$";
++}
++
++/** Prefix to print before an amount spent with `provider`. */
++export function currencyPrefixFor(provider: string): string {
++	return isCgsProvider(provider) ? cgsCurrencyPrefix() : "$";
++}
+diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
+index 850dd83..f133f80 100644
+--- a/packages/coding-agent/src/cli/usage-cli.ts
++++ b/packages/coding-agent/src/cli/usage-cli.ts
+@@ -28,6 +28,7 @@ import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
+ import { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "@oh-my-pi/pi-ai/auth-storage";
+ import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
+ import { formatProviderName } from "../modes/view-model/chrome/format";
++import { cgsCurrencyPrefix } from "../cgs-currency";
+ import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
+ import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+ import chalk from "@oh-my-pi/pi-utils/chalk";
+@@ -248,6 +249,7 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
+ 
+ function formatUnitValue(value: number, unit: UsageUnit): string {
+ 	if (unit === "usd") return `$${value.toFixed(2)}`;
++	if (unit === "currency") return `${cgsCurrencyPrefix()}${value.toFixed(2)}`;
+ 	// Metered balances (e.g. Codex spend-cap credits) arrive as fractional floats.
+ 	return formatNumber(value, 2);
+ }
+@@ -260,6 +262,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
+ 	bytes: " bytes",
+ 	percent: "",
+ 	usd: "",
++	currency: "",
+ 	unknown: "",
+ };
+ 
+diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
+index 263da8f..c156f42 100644
+--- a/packages/coding-agent/src/modes/controllers/command-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
+@@ -73,6 +73,7 @@ import {
+ 	limitMatchesActiveAccount,
+ } from "../../slash-commands/helpers/active-oauth-account";
+ import { formatProviderName } from "../view-model/chrome/format";
++import { cgsCurrencyPrefix } from "../../cgs-currency";
+ import { formatCompactQuota } from "../../advisor/advisor-config-types";
+ import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
+ import { TernError, type TernErrorKind, type TernForked, TernSocketClient } from "../../tools/browser/tern/wire";
+@@ -2573,7 +2574,9 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
+ 		const used =
+ 			limit.amount.unit === "usd"
+ 				? `$${usedAmount.toFixed(2)}`
+-				: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
++				: limit.amount.unit === "currency"
++					? `${cgsCurrencyPrefix()}${usedAmount.toFixed(2)}`
++					: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
+ 		return uiTheme.fg("dim", truncateJobLabel(`${used} used`, barWidth));
+ 	}
+ 	const fraction = resolveUsedFraction(limit);
+diff --git a/packages/coding-agent/src/modes/interactive/status-line.ts b/packages/coding-agent/src/modes/interactive/status-line.ts
+index 27a6bac..b0cf209 100644
+--- a/packages/coding-agent/src/modes/interactive/status-line.ts
++++ b/packages/coding-agent/src/modes/interactive/status-line.ts
+@@ -16,6 +16,7 @@ import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+ import * as vcs from "@oh-my-pi/pi-natives/vcs";
+ import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
+ import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
++import { cgsCurrencyPrefix, isCgsProvider } from "../../cgs-currency";
+ import type { AgentViewSession } from "../../session/agent-session-handle";
+ import { latestJobWidget } from "../../tools/details/job-widget";
+ import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
+@@ -505,6 +506,7 @@ export class SessionStatusLine implements StatusLineModel {
+ 				subagentCost: stats.subagentCost,
+ 			},
+ 			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
++			...(model && isCgsProvider(model.provider) ? { currency: cgsCurrencyPrefix() } : {}),
+ 			...(this.#focusedAgentId === undefined && modes.subagentTreeCost
+ 				? { subagentTreeCost: modes.subagentTreeCost }
+ 				: {}),
+diff --git a/packages/coding-agent/src/modes/view-model/chrome/format.ts b/packages/coding-agent/src/modes/view-model/chrome/format.ts
+index c1cf2d6..2e2aa2d 100644
+--- a/packages/coding-agent/src/modes/view-model/chrome/format.ts
++++ b/packages/coding-agent/src/modes/view-model/chrome/format.ts
+@@ -1,5 +1,8 @@
++import { isCgsProvider } from "../../../cgs-currency";
+ /** Title-case a provider id for display (`openai-codex` → `Openai Codex`). */
+ export function formatProviderName(provider: string): string {
++	// The CGS login and its four channels (cgs-claude, cgs-codex, ...) are one service to the user.
++	if (isCgsProvider(provider)) return "Cicori Good Service";
+ 	return provider
+ 		.split(/[-_]/g)
+ 		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
+diff --git a/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts b/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
+index 6bf8440..18db524 100644
+--- a/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
++++ b/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
+@@ -11,6 +11,7 @@ import {
+ 	getModelPricingStatus,
+ 	modelsAreEqual,
+ } from "@oh-my-pi/pi-catalog/models";
++import { currencyPrefixFor } from "../../../cgs-currency";
+ import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+ import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
+ import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
+@@ -981,7 +982,9 @@ function priceWith(model: Model, sep: string): string {
+ 	if (declared !== undefined) return PRICING_LABELS[declared].short;
+ 	if (isFreeModel(model)) return "free";
+ 	const cost = getEffectiveTokenCost(model.cost);
+-	return withCreditBadge(model, `$${formatCostLeg(cost.input)}${sep}${formatCostLeg(cost.output)}`);
++	// CGS channels are priced in the relay's currency; every other provider in dollars.
++	const symbol = currencyPrefixFor(model.provider);
++	return withCreditBadge(model, `${symbol}${formatCostLeg(cost.input)}${sep}${formatCostLeg(cost.output)}`);
+ }
+ 
+ /** `$3/15` per-million price column. */
+diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts b/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
+index be5220e..1554861 100644
+--- a/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
++++ b/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
+@@ -1,4 +1,5 @@
+ import { resolveUsedFraction, type UsageLimit } from "@oh-my-pi/pi-ai/usage";
++import { cgsCurrencyPrefix } from "../../cgs-currency";
+ 
+ /**
+  * Formatting for usage limits that carry an absolute amount but no fraction,
+@@ -39,6 +40,7 @@ export function isRemainingOnlyAbsoluteAmount(limit: UsageLimit): boolean {
+ 
+ function formatQuantity(value: number, unit: UsageLimit["amount"]["unit"], suffix: string): string {
+ 	if (unit === "usd") return `$${value.toFixed(2)} ${suffix}`;
++	if (unit === "currency") return `${cgsCurrencyPrefix()}${value.toFixed(2)} ${suffix}`;
+ 	const formatted = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+ 	return `${formatted} ${unit} ${suffix}`;
+ }
+diff --git a/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts b/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
+index 633dac5..45469d6 100644
+--- a/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
++++ b/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
+@@ -13,6 +13,7 @@ import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
+ import type { UnavailableUsageAccount } from "../../../modes/view-model/overlays/usage-dashboard";
+ import { formatProviderName } from "../../../modes/view-model/chrome/format";
+ import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../../../slash-commands/helpers/usage-amounts";
++import { cgsCurrencyPrefix } from "../../../cgs-currency";
+ import {
+ 	collapseSharedUsageReports,
+ 	formatLimitTitle,
+@@ -127,6 +128,7 @@ export function absoluteAmount(limits: readonly UsageLimit[]): string | undefine
+ 		if (!limits.every(limit => limit.amount.unit === unit)) return undefined;
+ 		const used = Math.max(0, ...limits.map(limit => limit.amount.used ?? 0));
+ 		if (unit === "usd") return `$${used.toFixed(2)} used`;
++		if (unit === "currency") return `${cgsCurrencyPrefix()}${used.toFixed(2)} used`;
+ 		return `${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(used)} ${unit} used`;
+ 	}
+ 	return formatRemainingOnlyTotal(limits);
+diff --git a/packages/coding-agent/src/ui/status/facts.ts b/packages/coding-agent/src/ui/status/facts.ts
+index f829687..d96bcd5 100644
+--- a/packages/coding-agent/src/ui/status/facts.ts
++++ b/packages/coding-agent/src/ui/status/facts.ts
+@@ -98,6 +98,8 @@ export interface StatusFacts {
+ 	readonly profile?: string;
+ 	readonly usage: StatusUsage;
+ 	readonly usingSubscription: boolean;
++	/** Amount prefix when the active model's provider bills in something other than dollars (CGS: the relay's currency). */
++	readonly currency?: string;
+ 	/** Spend of the whole subagent tree (Agent Hub). */
+ 	readonly subagentTreeCost?: number;
+ 	readonly advisorCost?: { readonly cost: number; readonly usingSubscription: boolean };
+diff --git a/packages/coding-agent/src/ui/status/format.ts b/packages/coding-agent/src/ui/status/format.ts
+index 3a2515e..b219f31 100644
+--- a/packages/coding-agent/src/ui/status/format.ts
++++ b/packages/coding-agent/src/ui/status/format.ts
+@@ -58,6 +58,8 @@ export function formatContextUsage(percent: number | null, window: number, token
+ export interface Billing {
+ 	readonly cost: number;
+ 	readonly usingSubscription: boolean;
++	/** Amount prefix when the spend is not in dollars; `$` when absent. */
++	readonly currency?: string;
+ 	readonly premiumRequests: number;
+ 	/** Decimals of the amounts (status line 2, footer 3). */
+ 	readonly digits: number;
+@@ -91,7 +93,7 @@ export function billingSummary(billing: Billing, symbols: SymbolSet): string | u
+ 	const subscriptionUnit = symbols.preset === "nerd" && subscription ? `${subscription} ` : "S";
+ 	let shown: boolean | undefined;
+ 	if (billing.cost || billing.pricingPeriod || subagentCost) {
+-		const unit = billing.usingSubscription ? subscriptionUnit : "$";
++		const unit = billing.usingSubscription ? subscriptionUnit : (billing.currency ?? "$");
+ 		parts.push(`${unit}${billing.cost.toFixed(billing.digits)}`);
+ 		shown = billing.usingSubscription;
+ 	} else if (billing.usingSubscription) {
+diff --git a/packages/coding-agent/src/ui/status/segments.ts b/packages/coding-agent/src/ui/status/segments.ts
+index 2d52a58..31f1f8a 100644
+--- a/packages/coding-agent/src/ui/status/segments.ts
++++ b/packages/coding-agent/src/ui/status/segments.ts
+@@ -445,6 +445,7 @@ function costSeg(input: SegInput): SegView | null {
+ 			cost: own,
+ 			subagentCost: Math.max(facts.subagentTreeCost ?? 0, facts.usage.subagentCost ?? 0),
+ 			usingSubscription: facts.usingSubscription,
++			currency: facts.currency,
+ 			premiumRequests: facts.usage.premiumRequests,
+ 			digits: 2,
+ 			pricingPeriod: facts.pricingPeriod,
+diff --git a/packages/coding-agent/test/cgs-currency.test.ts b/packages/coding-agent/test/cgs-currency.test.ts
+new file mode 100644
+index 0000000..2f57410
+--- /dev/null
++++ b/packages/coding-agent/test/cgs-currency.test.ts
+@@ -0,0 +1,51 @@
++import { afterEach, describe, expect, it } from "bun:test";
++import { calculateCost } from "@oh-my-pi/pi-catalog/models";
++import { CGS_CURRENCY_ENV } from "../src/cgs-currency";
++import { formatProviderName } from "../src/modes/view-model/chrome/format";
++import { formatCostPair } from "../src/modes/view-model/overlays/model-browser";
++import { billingSummary } from "../src/ui/status/format";
++
++const model = (provider: string) =>
++	({ provider, id: "m", cost: { input: 1.2, output: 6, cacheRead: 0.12, cacheWrite: 1.5 } }) as never;
++const usage = () =>
++	({
++		input: 1_000_000,
++		output: 1_000_000,
++		cacheRead: 0,
++		cacheWrite: 0,
++		totalTokens: 2_000_000,
++		cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9, total: 36 },
++	}) as never;
++const symbols = { preset: "unicode", icon: () => "" } as never;
++const bill = (currency?: string) =>
++	billingSummary({ cost: 0.5, usingSubscription: false, premiumRequests: 0, digits: 2, ...(currency ? { currency } : {}) }, symbols);
++
++afterEach(() => {
++	delete process.env[CGS_CURRENCY_ENV];
++});
++
++describe("CGS channels (cgscli patch P7)", () => {
++	it("prices a CGS model in the relay's currency (a custom symbol, an emoji, keeps its space) and any other provider in dollars", () => {
++		expect(formatCostPair(model("cgs-claude"))).toBe("$1.2/6"); // currency not learned yet
++		process.env[CGS_CURRENCY_ENV] = "¥";
++		expect(formatCostPair(model("cgs-claude"))).toBe("¥1.2/6");
++		process.env[CGS_CURRENCY_ENV] = "🐱 ";
++		expect(formatCostPair(model("cgs-codex"))).toBe("🐱 1.2/6");
++		expect(formatCostPair(model("anthropic"))).toBe("$1.2/6");
++	});
++
++	it("prints the status line spend with the active provider's currency, dollars when none is given", () => {
++		expect(bill()).toBe("$0.50");
++		expect(bill("¥")).toBe("¥0.50");
++		expect(bill("HK$ ")).toBe("HK$ 0.50");
++	});
++
++	it("prices CGS usage like any other, so the session shows what it spent", () => {
++		expect(calculateCost(model("cgs-codex"), usage()).total).toBeCloseTo(7.2);
++	});
++
++	it("shows the login and every channel as Cicori Good Service, other providers as before", () => {
++		for (const id of ["cgs", "cgs-claude", "cgs-codex", "cgs-antigravity", "cgs-openai"]) expect(formatProviderName(id)).toBe("Cicori Good Service");
++		expect(formatProviderName("openai-codex")).toBe("Openai Codex");
++	});
++});
+diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
+index 62b5008..07a016d 100644
+--- a/packages/stats/src/db.ts
++++ b/packages/stats/src/db.ts
+@@ -694,6 +694,8 @@ interface ResolvedCost {
+ }
+ 
+ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
++	// CGS channels are billed by the API relay and shown on its own bill; omp's totals do not count them.
++	if (stats.provider === "cgs" || stats.provider.startsWith("cgs-")) return { cost: ZERO_USAGE_COST, unpriced: false };
+ 	// `usage.cost` is absent when the session entry recorded no price at all, and
+ 	// legacy payloads can carry a partially-populated cost object (e.g. only
+ 	// `total`). The messages table declares every cost_* column as REAL NOT NULL,
+diff --git a/packages/stats/test/cgs-cost.test.ts b/packages/stats/test/cgs-cost.test.ts
+new file mode 100644
+index 0000000..c1de43b
+--- /dev/null
++++ b/packages/stats/test/cgs-cost.test.ts
+@@ -0,0 +1,40 @@
++import { describe, expect, it } from "bun:test";
++import { getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
++import type { MessageStats } from "@oh-my-pi/omp-stats/types";
++import { installStatsTestIsolation } from "./helpers/temp-agent";
++
++installStatsTestIsolation("@pi-stats-cgs-");
++
++function stats(provider: string, entryId: string): MessageStats {
++	return {
++		sessionFile: "/tmp/cgs-session.jsonl",
++		entryId,
++		folder: "/tmp/project",
++		model: "some-model",
++		provider,
++		api: "anthropic-messages",
++		timestamp: Date.now(),
++		duration: 1000,
++		ttft: 100,
++		stopReason: "stop",
++		errorMessage: null,
++		usage: {
++			input: 1000,
++			output: 500,
++			cacheRead: 0,
++			cacheWrite: 0,
++			totalTokens: 1500,
++			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, total: 3 },
++		},
++		agentType: "main",
++	} as MessageStats;
++}
++
++describe("CGS channels in omp's totals (cgscli patch P7)", () => {
++	it("records no cost for CGS channels, which the API relay bills; other providers keep theirs", async () => {
++		await initDb();
++		insertMessageStats([stats("anthropic", "a"), stats("cgs-claude", "b"), stats("cgs", "c")]);
++		const cost = Object.fromEntries(getRecentRequests(10).map(row => [row.provider, row.usage.cost.total]));
++		expect(cost).toEqual({ anthropic: 3, "cgs-claude": 0, cgs: 0 });
++	});
++});
+-- 
+2.47.3
+

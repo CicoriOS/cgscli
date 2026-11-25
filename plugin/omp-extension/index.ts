@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
+import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, applyCurrencyEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
 import { deviceLogin } from "./login.ts";
 import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager, createConnect, currentPlatform, parseComponentsLock, resolveAgentDir, type ComponentManagerImpl, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
@@ -192,10 +192,13 @@ export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<s
   applyCredentialEnv(a.clientSecret);
   const [ids, pricing] = await Promise.all([fetchModelIds(via, a.baseUrl, a.clientSecret), fetchPricing(via, a.baseUrl, a.clientSecret)]);
   const prior = readAccount(o.agentDir);
-  const prices = pricing ?? prior?.pricing ?? {};
+  const prices = pricing?.models ?? prior?.pricing ?? {};
+  // Prices and amounts are in the relay's display currency; omp prints it for the cgs-* models.
+  const currency = pricing?.currency ?? prior?.currency;
+  applyCurrencyEnv(currency);
   o.connect.hub.setModels(ids, prices);
   await registerChannels(o.pi, (i, init) => o.connect.fetch(new Request(i, init)));
-  writeAccount(o.agentDir, { ...a, models: ids, pricing: prices });
+  writeAccount(o.agentDir, { ...a, models: ids, pricing: prices, ...(currency ? { currency } : {}) });
   await (o.applyLayout ?? applyDefaultLayout)({ agentDir: o.agentDir, baseUrl: a.baseUrl, clientSecret: a.clientSecret, fetch: via });
   return ids;
 }
@@ -216,6 +219,7 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   const account = readAccount(agentDir);
   if (account) {
     applyCredentialEnv(account.clientSecret);
+    applyCurrencyEnv(account.currency);
     connect.hub.setModels(account.models, account.pricing);
     await registerChannels(pi, (i, init) => connect.fetch(new Request(i, init)));
     void sync(account).catch((e) => process.stderr.write(`cgs: ${e instanceof Error ? e.message : e}\n`));
