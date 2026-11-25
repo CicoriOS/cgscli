@@ -3,12 +3,12 @@ import { Server } from "./server.ts";
 import { listen, type Listener } from "./transport.ts";
 import type { RemoteLink } from "./contracts.ts";
 import { buildProfile, type ProfileOptions } from "./profile.ts";
-import type { TransportOption } from "./contracts.ts";
+import { defaultEndpoint } from "./transport.ts";
 import type { TspCodec } from "./tsp-host.ts";
 
 export interface DaemonOptions {
-  /** O3 is undecided: required, no default. */
-  transport: TransportOption;
+  /** Unix socket path or Windows named pipe; default is `defaultEndpoint()` (ADR 0017). */
+  endpoint?: string;
   connectVersion: string;
   ompVersion?: string | null;
   profile: ProfileOptions;
@@ -23,7 +23,7 @@ export interface DaemonOptions {
 
 export interface Daemon { address: string; server: Server; stop(): void }
 
-export function startDaemon(o: DaemonOptions): Daemon {
+export async function startDaemon(o: DaemonOptions): Promise<Daemon> {
   const profile = buildProfile(o.profile);
   const server = new Server({
     connectVersion: o.connectVersion,
@@ -38,7 +38,7 @@ export function startDaemon(o: DaemonOptions): Daemon {
       codec: o.codec,
     }),
   });
-  const l: Listener = listen(o.transport, (ch) => server.serve(ch));
+  const l: Listener = await listen(o.endpoint ?? defaultEndpoint(), (ch) => server.serve(ch));
   o.remote?.accept((ch) => server.serve(ch));
   return { address: l.address, server, stop: () => { server.close(); l.stop(); } };
 }

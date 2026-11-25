@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { Duplex, Msg } from "@cgscli/wire";
 import { startDaemon, type TspCodec } from "../../src/index.ts";
+import { defaultEndpoint, dial } from "../../src/transport.ts";
 
 const codec: TspCodec = {
   parse: (b) => { try { return JSON.parse(b); } catch { return null; } },
@@ -21,28 +26,29 @@ setInterval(() => {}, 1000);
 `;
 
 type M = Record<string, unknown>;
-function client(url: string) {
-  const ws = new WebSocket(url);
+const tmpEndpoint = () => process.platform === "win32"
+  ? `\\\\.\\pipe\\cgsc-${crypto.randomUUID()}`
+  : path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cgsc-")), "c.sock");
+
+async function client(endpoint: string) {
+  const ch: Duplex = await dial(endpoint);
   const msgs: M[] = [];
   let wake: (() => void)[] = [];
-  ws.onmessage = (e) => { msgs.push(JSON.parse(String(e.data))); const w = wake; wake = []; w.forEach((f) => f()); };
-  const opened = Promise.withResolvers<void>();
-  ws.onopen = () => opened.resolve();
+  ch.onMessage((m: Msg) => { msgs.push(m); const w = wake; wake = []; w.forEach((f) => f()); });
   // Resolves on the next message that makes `p` true; a hang is caught by the test timeout.
   const until = async (p: (m: M[]) => boolean) => {
     while (!p(msgs)) { const n = Promise.withResolvers<void>(); wake.push(n.resolve); await n.promise; }
   };
-  const hello = (kind: string) => ws.send(JSON.stringify({ t: "hello", proto: [1, 1], client: { kind, version: "0" }, profile: { name: "t", renders: [] } }));
-  return { msgs, until, opened: opened.promise, hello, send: (m: object) => ws.send(JSON.stringify(m)) };
+  const hello = (kind: string) => ch.send({ t: "hello", proto: [1, 1], client: { kind, version: "0" }, profile: { name: "t", renders: [] } });
+  return { msgs, until, hello, send: (m: object) => ch.send(m as Msg), close: () => ch.close() };
 }
 
 const profile = { agentDir: "/tmp/cgs-test/agent", ompBin: "/usr/bin/true", baseEnv: { PATH: "/usr/bin" } };
 
 test("daemon: snapshot, resume window, single writer, event reaches pty", async () => {
-  const d = startDaemon({ transport: { kind: "loopback" }, connectVersion: "0.0.0", profile, codec, cmd: [process.execPath, "-e", fake] });
+  const d = await startDaemon({ endpoint: tmpEndpoint(), connectVersion: "0.0.0", profile, codec, cmd: [process.execPath, "-e", fake] });
   try {
-    const a = client(d.address);
-    await a.opened;
+    const a = await client(d.address);
     a.hello("cli");
     a.send({ t: "session.create" });
     await a.until((m) => m.some((x) => x.t === "session.created"));
@@ -50,16 +56,14 @@ test("daemon: snapshot, resume window, single writer, event reaches pty", async 
     a.send({ t: "session.open", id });
     await a.until((m) => m.some((x) => (x.t === "tsp.delta" || x.t === "tsp.snapshot") && x.seq === 2));
 
-    const b = client(d.address);
-    await b.opened;
+    const b = await client(d.address);
     b.hello("web");
     b.send({ t: "session.open", id, resume: [{ streamId: "chat", lastSeq: 1 }] });
     await b.until((m) => m.some((x) => x.t === "tsp.delta"));
     expect(b.msgs.filter((x) => x.t === "tsp.delta").map((x) => x.seq)).toEqual([2]);
     expect(b.msgs.some((x) => x.t === "tsp.snapshot")).toBe(false);
 
-    const c = client(d.address);
-    await c.opened;
+    const c = await client(d.address);
     c.hello("web");
     c.send({ t: "session.open", id });
     await c.until((m) => m.some((x) => x.t === "tsp.snapshot"));
@@ -73,12 +77,35 @@ test("daemon: snapshot, resume window, single writer, event reaches pty", async 
 });
 
 test("protocol version mismatch is rejected", async () => {
-  const d = startDaemon({ transport: { kind: "loopback" }, connectVersion: "0", profile, codec, cmd: ["true"] });
+  const d = await startDaemon({ endpoint: tmpEndpoint(), connectVersion: "0", profile, codec, cmd: ["true"] });
   try {
-    const c = client(d.address);
-    await c.opened;
+    const c = await client(d.address);
     c.send({ t: "hello", proto: [7, 9], client: { kind: "cli", version: "0" }, profile: { name: "t", renders: [] } });
     await c.until((m) => m.length > 0);
     expect(c.msgs[0]).toMatchObject({ t: "error", code: "proto-unsupported" });
   } finally { d.stop(); }
+});
+
+test("a second daemon refuses a live endpoint, and takes over a stale one", async () => {
+  const ep = tmpEndpoint();
+  const d = await startDaemon({ endpoint: ep, connectVersion: "0", profile, codec, cmd: ["true"] });
+  await expect(startDaemon({ endpoint: ep, connectVersion: "0", profile, codec, cmd: ["true"] })).rejects.toThrow("already running");
+  const c = await client(ep);
+  c.close();
+  d.stop();
+  if (process.platform === "win32") return; // a pipe leaves no file behind
+  // A crash leaves the socket file behind: a plain file where nobody listens must not block a restart.
+  fs.writeFileSync(ep, "");
+  const d2 = await startDaemon({ endpoint: ep, connectVersion: "0", profile, codec, cmd: ["true"] });
+  d2.stop();
+});
+
+test("the socket is private to the user", async () => {
+  const ep = tmpEndpoint();
+  const d = await startDaemon({ endpoint: ep, connectVersion: "0", profile, codec, cmd: ["true"] });
+  try {
+    if (process.platform !== "win32") expect(fs.statSync(ep).mode & 0o777).toBe(0o600);
+  } finally { d.stop(); }
+  expect(fs.existsSync(ep)).toBe(false);
+  expect(defaultEndpoint({ CGSCONNECT_SOCKET: "/x/y.sock" })).toBe("/x/y.sock");
 });

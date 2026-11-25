@@ -40,5 +40,4 @@ export interface ComponentManager {
   envPath(): string[];
 }
 
-/** O3 is undecided: callers must choose; there is no default. */
-export type TransportOption = { kind: "unix"; path: string } | { kind: "loopback"; port?: number };
+

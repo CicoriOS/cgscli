@@ -24,7 +24,7 @@ These are owner decisions in the docs; the code takes them as required inputs in
 
 | ID | Where it shows up |
 |---|---|
-| O3 local transport (unix socket / named pipe vs loopback TCP) | `startDaemon({ transport })` has no default. The provider proxy binds loopback only because omp reaches providers over HTTP. |
+| O3 local transport | Decided (ADR 0017): unix socket / named pipe, one JSON message per line, default endpoint from `defaultEndpoint()`. The provider proxy binds loopback only because omp reaches providers over HTTP. |
 | O4 patch count/file limits | `patches/limits.json` holds `null`; `scripts/patch-limits.ts` reports them as undecided and does not enforce. |
 | Noise pattern for remote (XX vs IK) | `createRemoteLink({ pattern })` is required. |
 | Pairing approval UX | `createRemoteLink({ approve })` is optional; without it a valid single-use pairing code authorizes. |
