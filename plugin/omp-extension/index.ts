@@ -7,6 +7,7 @@ import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
+import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
 // library (ADR 0014): provider traffic is handed to its router by direct call, so our providers leave through the
 // cgsconnect router (direct first, relay tunnel on failure) and nothing listens on a port. Loaded with
@@ -198,6 +199,7 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   process.once("exit", () => connect.stop());
   // omp patch P9 asks here for the wire session id of every cgs-* request (ADR 0022); a stock omp never asks.
   Reflect.set(globalThis, SESSION_IDENTITY_HOOK, (provider: string, sessionId: string) => connect.hub.sessionIdentity(provider, sessionId));
+  registerUnknownToolGuidance();
   const agentDir = resolveAgentDir();
   const sync = (a: LoggedIn) => syncAccount({ pi, connect, agentDir }, a);
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.

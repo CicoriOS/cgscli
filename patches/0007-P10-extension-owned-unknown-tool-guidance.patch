@@ -1,0 +1,256 @@
+From 844074389cb04ebc14b3939e5794d2b1bc5be051 Mon Sep 17 00:00:00 2001
+From: Creeper23456 <Creeper23456@outlook.com>
+Date: Wed, 25 Nov 2026 23:03:11 +0800
+Subject: [PATCH 7/7] P10: let the CGS extension guide unknown tool errors
+
+Reason: Declined tool names need actionable guidance without declaring or authorizing any additional tools (ADR 0023).
+Upstream: none (CGS-specific extension hook).
+Remove-when: upstream exposes a post-resolution miss hook with the actual wire roster, or the extension no longer needs the guidance.
+
+Pass the assistant API and just the outgoing names and descriptions to the advisory callback. The callback cannot participate in resolving or executing tools.
+---
+ packages/agent/src/agent-loop.ts              |  25 ++++-
+ .../agent/test/unknown-tool-guidance.test.ts  | 105 ++++++++++++++++++
+ packages/ai/src/providers/anthropic.ts        |  19 ++++
+ packages/ai/src/utils/block-symbols.ts        |   9 ++
+ 4 files changed, 156 insertions(+), 2 deletions(-)
+ create mode 100644 packages/agent/test/unknown-tool-guidance.test.ts
+
+diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
+index 2c3bfa9..303f050 100644
+--- a/packages/agent/src/agent-loop.ts
++++ b/packages/agent/src/agent-loop.ts
+@@ -39,6 +39,9 @@ import {
+ 	copyCursorExecResolved,
+ 	getStreamingPartialJson,
+ 	kCursorExecResolved,
++	kRequestToolRoster,
++	kUnknownToolGuidance,
++	type RequestToolRosterCarrier,
+ } from "@oh-my-pi/pi-ai/utils/block-symbols";
+ import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
+ import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
+@@ -3086,9 +3089,23 @@ function suggestToolNames(
+  */
+ function formatToolNotFoundMessage(
+ 	name: string,
++	message: AssistantMessage,
+ 	tools: ReadonlyArray<Pick<AgentTool, "name" | "customWireName">> | undefined,
+ 	fallbackNames?: Iterable<string>,
+ ): string {
++	const guidance = Reflect.get(globalThis, kUnknownToolGuidance);
++	if (typeof guidance === "function") {
++		try {
++			const result: unknown = guidance({
++				api: message.api,
++				name,
++				tools: (message as RequestToolRosterCarrier)[kRequestToolRoster],
++			});
++			if (typeof result === "string" && result.length > 0) return result;
++		} catch {
++			// Error guidance is advisory: preserve the ordinary miss if the hook fails.
++		}
++	}
+ 	const suggestions = suggestToolNames(name, tools, fallbackNames);
+ 	if (suggestions.length === 0) return `Tool ${name} not found`;
+ 	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?`;
+@@ -3248,7 +3265,9 @@ async function prepareToolCallDispatch(
+ 		const validate = (args: Record<string, unknown>): Record<string, unknown> | undefined => {
+ 			try {
+ 				if (!tool) {
+-					throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools, suggestFallbackToolNames?.()));
++					throw new Error(
++						formatToolNotFoundMessage(toolCall.name, assistantMessage, context.tools, suggestFallbackToolNames?.()),
++					);
+ 				}
+ 				return validateAgentToolArguments(tool, { ...toolCall, arguments: args });
+ 			} catch (validationError) {
+@@ -3724,7 +3743,9 @@ async function executeToolCalls(
+ 		await runInActiveSpan(toolSpan, async () => {
+ 			try {
+ 				if (!tool) {
+-					throw new Error(formatToolNotFoundMessage(toolCall.name, tools, suggestFallbackToolNames?.()));
++					throw new Error(
++						formatToolNotFoundMessage(toolCall.name, assistantMessage, tools, suggestFallbackToolNames?.()),
++					);
+ 				}
+ 				if (abortBeforeToolExecution()) return;
+ 
+diff --git a/packages/agent/test/unknown-tool-guidance.test.ts b/packages/agent/test/unknown-tool-guidance.test.ts
+new file mode 100644
+index 0000000..4c74ba8
+--- /dev/null
++++ b/packages/agent/test/unknown-tool-guidance.test.ts
+@@ -0,0 +1,105 @@
++import { expect, test } from "bun:test";
++import { type } from "@oh-my-pi/omptype";
++import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
++import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
++import type { FetchImpl, Message, ToolCall } from "@oh-my-pi/pi-ai";
++import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
++import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { buildModel } from "@oh-my-pi/pi-catalog/build";
++import { createUserMessage } from "./helpers";
++
++const model = buildModel({
++	id: "claude-sonnet-4-6",
++	name: "Sonnet",
++	api: "anthropic-messages",
++	provider: "anthropic",
++	baseUrl: "https://example.test",
++	reasoning: false,
++	input: ["text"],
++	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
++	contextWindow: 64_000,
++	maxTokens: 4096,
++});
++
++function sse(events: Record<string, unknown>[]): Response {
++	return new Response(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
++		headers: { "content-type": "text/event-stream" },
++	});
++}
++
++for (const branch of ["prepare", "execute"] as const) {
++	test(`unknown-tool guidance sees the wire roster on a ${branch} miss without replacing fallback resolution`, async () => {
++		const hook = Symbol.for("cgscli.unknownToolGuidance");
++		const previous = Object.getOwnPropertyDescriptor(globalThis, hook);
++		const guidanceInputs: unknown[] = [];
++		const resultByName: Record<string, { content: unknown; isError: boolean }> = {};
++		const usage = { input_tokens: 10, output_tokens: 8 };
++		const requestBodies: unknown[] = [];
++		const fetch: FetchImpl = async (input, init) => {
++			const body: unknown = await new Request(input, init).json();
++			requestBodies.push(body);
++			return sse([
++				{ type: "message_start", message: { id: "msg", model: model.id, usage } },
++				...(requestBodies.length === 1
++					? ["UnknownTool", "mcp_alias"].flatMap((name, index) => [
++							{ type: "content_block_start", index, content_block: { type: "tool_use", id: `call_${index}`, name, input: {} } },
++							{ type: "content_block_stop", index },
++						])
++					: [
++							{ type: "content_block_start", index: 0, content_block: { type: "text", text: "Done" } },
++							{ type: "content_block_stop", index: 0 },
++						]),
++				{ type: "message_delta", delta: { stop_reason: requestBodies.length === 1 ? "tool_use" : "end_turn" }, usage },
++				{ type: "message_stop" },
++			]);
++		};
++		const readTool: AgentTool = {
++			name: "read",
++			label: "Read",
++			description: "Reads a file",
++			parameters: type({}),
++			execute: async () => ({ content: [{ type: "text", text: "MCP fallback ran" }] }),
++		};
++		let unknownCall: ToolCall | undefined;
++		Reflect.set(globalThis, hook, (input: unknown) => {
++			guidanceInputs.push(input);
++			return "test guidance";
++		});
++		try {
++			const stream = agentLoop(
++				[createUserMessage("Check the tool roster")],
++				{ systemPrompt: ["Test"], messages: [], tools: [readTool] },
++				{
++					// A stream may return a different API than the configured model.
++					model: createMockModel({ responses: [] }).model,
++					convertToLlm: messages => messages.filter((m): m is Message => m.role === "user" || m.role === "assistant" || m.role === "toolResult"),
++					resolveFallbackTool: name => name === "mcp_alias" ? readTool : undefined,
++					transformAssistantMessage: message => {
++						unknownCall = message.content.find((block): block is ToolCall => block.type === "toolCall" && block.name === "UnknownTool");
++					},
++					beforeToolCall: async () => {
++						// Simulate a late call-ID change: the first call has no matching prepared entry at dispatch.
++						if (branch === "execute" && unknownCall) unknownCall.id = "late_call";
++					},
++				},
++				undefined,
++				(_model, context) => streamAnthropic(model, context, { apiKey: "sk-ant-test", isOAuth: true, fetch }),
++			);
++			for await (const event of stream) {
++				if (event.type === "message_end" && event.message.role === "toolResult") {
++					resultByName[event.message.toolName] = event.message;
++				}
++			}
++		} finally {
++			if (previous) Object.defineProperty(globalThis, hook, previous);
++			else Reflect.deleteProperty(globalThis, hook);
++		}
++		const roster = [{ name: "_read", description: "Reads a file" }];
++		expect(requestBodies[0]).toMatchObject({ tools: roster });
++		expect(guidanceInputs).toEqual(Array.from({ length: branch === "execute" ? 2 : 1 }, () => ({
++			api: "anthropic-messages", name: "UnknownTool", tools: roster,
++		})));
++		expect(resultByName.UnknownTool).toMatchObject({ isError: true, content: [{ type: "text", text: "test guidance" }] });
++		expect(resultByName.read).toMatchObject({ isError: false, content: [{ type: "text", text: "MCP fallback ran" }] });
++	});
++}
+diff --git a/packages/ai/src/providers/anthropic.ts b/packages/ai/src/providers/anthropic.ts
+index 27c6842..808c2aa 100644
+--- a/packages/ai/src/providers/anthropic.ts
++++ b/packages/ai/src/providers/anthropic.ts
+@@ -83,9 +83,12 @@ import {
+ 	isPerCallContextMessage,
+ 	isSyntheticUser,
+ 	kConversationalUser,
++	kRequestToolRoster,
+ 	kStreamingBlockIndex,
+ 	kStreamingLastParseLen,
+ 	kStreamingPartialJson,
++	kUnknownToolGuidance,
++	type RequestToolRosterCarrier,
+ } from "../utils/block-symbols";
+ import { withReplaySafeStreamRetry } from "../utils/empty-completion-retry";
+ import { AssistantMessageEventStream } from "../utils/event-stream";
+@@ -2813,6 +2816,7 @@ const streamAnthropicOnce = (
+ 					output.stopReason = "length";
+ 					break;
+ 				}
++				let capturedToolRoster = false;
+ 				const anthropicRequest: unknown =
+ 					isOAuthToken && client.beta
+ 						? client.beta.messages.create({ ...wireParams, stream: true }, requestOptions)
+@@ -3114,6 +3118,21 @@ const streamAnthropicOnce = (
+ 									kind: "anthropicServerTool",
+ 								});
+ 							} else if (event.content_block.type === "tool_use") {
++								if (!capturedToolRoster && typeof Reflect.get(globalThis, kUnknownToolGuidance) === "function") {
++									// Use the declarations after payload hooks and thread shaping, once per tool turn.
++									const declarations = transport
++										? (transportPayload as { tools?: unknown } | undefined)?.tools
++										: wireParams.tools;
++									(output as RequestToolRosterCarrier)[kRequestToolRoster] = Array.isArray(declarations)
++										? declarations.flatMap((tool: unknown) => {
++												if (!isRecord(tool)) return [];
++												const { name, description } = tool;
++												if (typeof name !== "string") return [];
++												return [{ name, description: typeof description === "string" ? description : undefined }];
++											})
++										: [];
++									capturedToolRoster = true;
++								}
+ 								streamedReplayUnsafeContent = true;
+ 								const block: Block = {
+ 									type: "toolCall",
+diff --git a/packages/ai/src/utils/block-symbols.ts b/packages/ai/src/utils/block-symbols.ts
+index 8693521..da669f2 100644
+--- a/packages/ai/src/utils/block-symbols.ts
++++ b/packages/ai/src/utils/block-symbols.ts
+@@ -222,3 +222,12 @@ export function setContextHistoryIndex(message: ContextHistoryIndexCarrier, inde
+ export function clearContextHistoryIndex(message: ContextHistoryIndexCarrier): void {
+ 	delete message[kContextHistoryIndex];
+ }
++
++/** Private CGS extension hook; supplies presentation data, never executors or arguments. */
++export const kUnknownToolGuidance = Symbol.for("cgscli.unknownToolGuidance");
++
++/** Per-response copy of the wire roster, retained across message spreads but not JSON. */
++export const kRequestToolRoster = Symbol("provider.message.requestToolRoster");
++export type RequestToolRosterCarrier = object & {
++	[kRequestToolRoster]?: readonly Readonly<{ name: string; description?: string }>[];
++};
+-- 
+2.47.3
+
