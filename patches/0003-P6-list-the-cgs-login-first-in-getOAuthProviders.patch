@@ -1,0 +1,64 @@
+From fc7ab30232c124fe0bb9a2011f33aa5f3e27cf24 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 14:51:30 +0800
+Subject: [PATCH 3/3] P6: list the cgs login first in getOAuthProviders
+
+Reason: the CGS build wants its own sign-in as the first login entry everywhere (TUI /login, `omp login`, setup scene). All three take their order from getOAuthProviders(), which put extension-registered logins last.
+Upstream: none yet (CGS-specific ordering, not a candidate PR)
+Remove-when: the build no longer ships the cgs extension or upstream lets extensions order their login entry
+---
+ packages/ai/src/registry/oauth/index.ts  |  7 ++++++-
+ packages/ai/test/oauth-cgs-first.test.ts | 19 +++++++++++++++++++
+ 2 files changed, 25 insertions(+), 1 deletion(-)
+ create mode 100644 packages/ai/test/oauth-cgs-first.test.ts
+
+diff --git a/packages/ai/src/registry/oauth/index.ts b/packages/ai/src/registry/oauth/index.ts
+index f7da389..38fc88f 100644
+--- a/packages/ai/src/registry/oauth/index.ts
++++ b/packages/ai/src/registry/oauth/index.ts
+@@ -31,6 +31,8 @@ const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
+ 	storeCredentialsAs: provider.storeCredentialsAs,
+ }));
+ 
++/** Id the CGS extension registers its login under (cgscli plugin/omp-extension); listed first by {@link getOAuthProviders}. */
++const CGS_PROVIDER_ID = "cgs";
+ const customOAuthProviders = new Map<string, OAuthProviderInterface>();
+ 
+ /** Paused provider ids the end user turned back on (see {@link setUnpausedProviders}). */
+@@ -263,7 +265,10 @@ export function getOAuthProviders(): OAuthProviderInfo[] {
+ 	const builtIns = builtInOAuthProviders.filter(
+ 		provider => !customOAuthProviders.has(provider.id) && providerPauseReason(provider.id) === undefined,
+ 	);
+-	return [...builtIns, ...customProviders];
++	// The CGS build's own sign-in is always the first entry; the selector, `omp login` and the setup scene all take their order from here.
++	const all = [...builtIns, ...customProviders];
++	const cgs = all.findIndex(provider => provider.id === CGS_PROVIDER_ID);
++	return cgs > 0 ? [all[cgs], ...all.slice(0, cgs), ...all.slice(cgs + 1)] : all;
+ }
+ 
+ /** Provider id that stores `providerId`'s credentials: login aliases (`openai-codex-device`) map to their target (`openai-codex`). */
+diff --git a/packages/ai/test/oauth-cgs-first.test.ts b/packages/ai/test/oauth-cgs-first.test.ts
+new file mode 100644
+index 0000000..b1ecb77
+--- /dev/null
++++ b/packages/ai/test/oauth-cgs-first.test.ts
+@@ -0,0 +1,19 @@
++import { afterEach, expect, test } from "bun:test";
++import { getOAuthProviders, registerOAuthProvider, unregisterOAuthProvider } from "../src/registry/oauth";
++
++afterEach(() => unregisterOAuthProvider("cgs"));
++
++const cgs = { id: "cgs", name: "Cicori Good Service", login: async () => "k" } as never;
++
++test("an extension-registered cgs login is listed first; the other entries keep their order", () => {
++	const before = getOAuthProviders().map(p => p.id);
++	registerOAuthProvider(cgs);
++	const after = getOAuthProviders().map(p => p.id);
++	expect(after[0]).toBe("cgs");
++	expect(after.slice(1)).toEqual(before);
++});
++
++test("without a cgs login the list is unchanged", () => {
++	const ids = getOAuthProviders().map(p => p.id);
++	expect(ids).not.toContain("cgs");
++});

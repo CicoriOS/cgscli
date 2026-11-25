@@ -1,0 +1,160 @@
+From 914a24611be92820e425b8b50d2ab9477a6ae9d6 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 13:58:01 +0800
+Subject: [PATCH] P4: CGS branding (logo, wordmark, changelog, update source)
+
+Reason: The CGS build shows the CGS mark and wordmark, its own startup changelog, and must not replace itself with stock omp; none of this is reachable from the extension API.
+Upstream: none (distribution-specific branding)
+Remove-when: CGS stops shipping a branded omp build
+
+- welcome logo/wordmark: CGS mark as half-block art (from assets/cgs-logo.svg)
+- changelog: CHANGELOG.cgs.md replaces CHANGELOG.md for the startup changelog and /changelog
+- update: the startup check and `omp update` do nothing unless PI_BUILD_URL is set
+---
+ packages/coding-agent/CHANGELOG.cgs.md        | 16 ++++++++++++++
+ packages/coding-agent/src/cli/update-cli.ts   |  6 +++++
+ packages/coding-agent/src/config.ts           |  2 +-
+ packages/coding-agent/src/main.ts             |  3 +++
+ packages/coding-agent/src/ui/welcome/logo.ts  | 22 ++++++++++++++-----
+ .../coding-agent/src/ui/welcome/welcome.tsx   |  2 +-
+ packages/coding-agent/src/utils/changelog.ts  |  2 +-
+ 7 files changed, 44 insertions(+), 9 deletions(-)
+ create mode 100644 packages/coding-agent/CHANGELOG.cgs.md
+
+diff --git a/packages/coding-agent/CHANGELOG.cgs.md b/packages/coding-agent/CHANGELOG.cgs.md
+new file mode 100644
+index 0000000..36bce37
+--- /dev/null
++++ b/packages/coding-agent/CHANGELOG.cgs.md
+@@ -0,0 +1,16 @@
++# Changelog
++
++CGS build of omp. Upstream's changelog is `CHANGELOG.md`; this file is what the startup changelog and `/changelog` show.
++
++## [19.1.1] - 2026-11-25
++
++### Added
++
++- CGS build: CGS logo and `cgs` wordmark on the welcome card.
++- Sign in to CGS from `/login`, with subscription channels registered by the pre-installed CGS extension.
++- `/cgs-doctor` and `/cgs-update` check and install the bundled components.
++
++### Changed
++
++- This build only updates from a CGS build service: `omp update` and the startup update check do nothing unless `PI_BUILD_URL` is set, so it is never replaced by stock omp.
++- Based on upstream omp v19.1.1 (`76b7d84`).
+diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
+index eb27805..18a2513 100644
+--- a/packages/coding-agent/src/cli/update-cli.ts
++++ b/packages/coding-agent/src/cli/update-cli.ts
+@@ -9,6 +9,7 @@ import * as os from "node:os";
+ import * as path from "node:path";
+ import { applyBinaryPatch } from "@oh-my-pi/pi-natives";
+ import {
++	$env,
+ 	$which,
+ 	APP_NAME,
+ 	compareVersions,
+@@ -2330,6 +2331,11 @@ async function runManagedUpdate(
+  * fails, or when another update holds the install lock.
+  */
+ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
++	if (!$env.PI_BUILD_URL?.trim()) {
++		const reason = "This is the CGS build of omp; set PI_BUILD_URL to a CGS build service to update it.";
++		console.log(chalk.yellow(reason));
++		return { kind: "unsupported", reason };
++	}
+ 	const ompPath = resolveOmpPath();
+ 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
+ 	if (manager) {
+diff --git a/packages/coding-agent/src/config.ts b/packages/coding-agent/src/config.ts
+index 39ec6c3..91400c0 100644
+--- a/packages/coding-agent/src/config.ts
++++ b/packages/coding-agent/src/config.ts
+@@ -76,7 +76,7 @@ export function getPackageDir(): string | undefined {
+  */
+ export function getChangelogPath(): string | undefined {
+ 	const packageDir = getPackageDir();
+-	return packageDir ? path.resolve(packageDir, "CHANGELOG.md") : undefined;
++	return packageDir ? path.resolve(packageDir, "CHANGELOG.cgs.md") : undefined;
+ }
+ 
+ // =============================================================================
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 2bec976..a754785 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -278,6 +278,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+ 		return;
+ 	}
+ 	try {
++		// Branded build: without a CGS build service (PI_BUILD_URL) there is no source to update from, and the
++		// stock omp registry/build service would replace this build with upstream omp.
++		if (!$env.PI_BUILD_URL?.trim()) return;
+ 		// Checkouts update through git and a manager (Tern) updates its omp itself:
+ 		// "run omp update" would be wrong advice for both.
+ 		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
+diff --git a/packages/coding-agent/src/ui/welcome/logo.ts b/packages/coding-agent/src/ui/welcome/logo.ts
+index dae391b..892a632 100644
+--- a/packages/coding-agent/src/ui/welcome/logo.ts
++++ b/packages/coding-agent/src/ui/welcome/logo.ts
+@@ -5,17 +5,27 @@
+  */
+ import type { ColorDepth } from "@oh-my-pi/pi-tui/theme/color";
+ 
+-/** The block-grid logo. */
+-export const LOGO: readonly string[] = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
++/**
++ * The block-grid logo: the CGS mark (a compass-point "A" crossing a "C" ring, with the inner arrowhead and the
++ * compass spikes), drawn in half-blocks from assets/cgs-logo.svg.
++ */
++export const LOGO: readonly string[] = [
++	"     ▄█▄     ",
++	"  ▄▀▀█ █▀▀▄  ",
++	"▄█▄ █ ▄ █ ▄▄▄",
++	" █ █▄███▄█   ",
++	"  █▀ ▄▄▄ ▀▄  ",
++	" ▀▀   ▄   ▀▀ ",
++];
+ 
+ /** Columns of {@link LOGO}. */
+-export const LOGO_WIDTH = 12;
++export const LOGO_WIDTH = 13;
+ 
+-/** The `omp` wordmark in half-blocks, set beside the logo from its second row (the `p` descends a row). */
+-export const WORDMARK: readonly string[] = ["▄▀▀▄ █▀▄▀▄ █▀▀▄", "▀▄▄▀ █ █ █ █▄▄▀", "           █"];
++/** The `cgs` wordmark in half-blocks, set beside the logo from its second row (the `g` descends a row). */
++export const WORDMARK: readonly string[] = ["▄▀▀ ▄▀▀▄ ▄▀▀▀", "▀▄▄ ▀▄▄█ ▄▄▄▀", "     ▄▄▀     "];
+ 
+ /** Columns of {@link WORDMARK}. */
+-export const WORDMARK_WIDTH = 15;
++export const WORDMARK_WIDTH = 13;
+ 
+ /** Gradient stops along the diagonal (truecolor). */
+ const STOPS: readonly (readonly [number, number, number])[] = [
+diff --git a/packages/coding-agent/src/ui/welcome/welcome.tsx b/packages/coding-agent/src/ui/welcome/welcome.tsx
+index 4ac8749..821aa94 100644
+--- a/packages/coding-agent/src/ui/welcome/welcome.tsx
++++ b/packages/coding-agent/src/ui/welcome/welcome.tsx
+@@ -84,7 +84,7 @@ export function Welcome(props: WelcomeProps): JSXNode {
+ 					<text
+ 						key="omp.welcome.wordmark"
+ 						role="omp.welcome.wordmark"
+-						spans={[{ t: "omp", s: "strong" }]}
++						spans={[{ t: "cgs", s: "strong" }]}
+ 						wrap="none"
+ 					/>
+ 					<text
+diff --git a/packages/coding-agent/src/utils/changelog.ts b/packages/coding-agent/src/utils/changelog.ts
+index beaaf32..c91b1fc 100644
+--- a/packages/coding-agent/src/utils/changelog.ts
++++ b/packages/coding-agent/src/utils/changelog.ts
+@@ -2,7 +2,7 @@ import * as path from "node:path";
+ import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+ import { Lexer } from "@oh-my-pi/pi-utils/marked";
+ import type { BunFile } from "bun";
+-import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
++import bundledChangelogPath from "../../CHANGELOG.cgs.md" with { type: "file" };
+ import type { SettingValueOf } from "../config/registry";
+ 
+ import type { cfgStartupChangelogMode } from "../modes/settings";

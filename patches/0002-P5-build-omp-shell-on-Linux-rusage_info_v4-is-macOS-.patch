@@ -1,0 +1,40 @@
+From a6ecee5010abd19c8a720c852f0da4bdde831b99 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Wed, 25 Nov 2026 14:19:46 +0800
+Subject: [PATCH 2/2] P5: build omp-shell on Linux (rusage_info_v4 is macOS-only)
+
+Reason: crates/shell/src/sys/spawn/unix.rs names libc::rusage_info_v4 in proc_usage's signature outside any cfg; libc has that type only on Apple targets, so omp-shell (and the natives addon) does not compile on Linux at 76b7d84.
+Upstream: none yet (candidate PR; not filed)
+Remove-when: upstream gates the type itself
+---
+ crates/shell/src/sys/spawn/unix.rs | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/crates/shell/src/sys/spawn/unix.rs b/crates/shell/src/sys/spawn/unix.rs
+index 26f49e0..b2f7f5c 100644
+--- a/crates/shell/src/sys/spawn/unix.rs
++++ b/crates/shell/src/sys/spawn/unix.rs
+@@ -1558,10 +1558,22 @@ fn reap(pid: i32) -> libc::rusage {
+ 	ru
+ }
+ 
++/// macOS's per-process counters beyond `rusage`. Other platforms never have them (`apple` is always `None`), but
++/// `proc_usage` still names the type, and `libc::rusage_info_v4` exists only on Apple targets.
++#[cfg(target_os = "macos")]
++type AppleUsage = libc::rusage_info_v4;
++#[cfg(not(target_os = "macos"))]
++#[allow(dead_code)]
++struct AppleUsage {
++	ri_instructions: u64,
++	ri_cycles: u64,
++	ri_lifetime_max_phys_footprint: u64,
++}
++
+ /// The usage `wait4` reported for a reaped child, plus on macOS what its
+ /// zombie still told [`proc_pid_rusage`](libc::proc_pid_rusage) (`apple`):
+ /// instructions, cycles and the peak memory footprint.
+-fn proc_usage(ru: &libc::rusage, apple: Option<&libc::rusage_info_v4>) -> ProcUsage {
++fn proc_usage(ru: &libc::rusage, apple: Option<&AppleUsage>) -> ProcUsage {
+ 	let ns = |tv: libc::timeval| {
+ 		(tv.tv_sec.max(0) as u64) * 1_000_000_000 + (tv.tv_usec.max(0) as u64) * 1_000
+ 	};
