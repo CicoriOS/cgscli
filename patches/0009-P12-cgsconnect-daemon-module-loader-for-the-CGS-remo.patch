@@ -1,0 +1,182 @@
+From b5c1b92c3f970959809cff0ee453629e77cee703 Mon Sep 17 00:00:00 2001
+From: t <a@b.c>
+Date: Thu, 26 Nov 2026 20:12:58 +0800
+Subject: [PATCH] P12: cgsconnect daemon module (loader for the CGS
+ remote-access unit)
+
+Reason: CGS remote access (ADR 0025, 0036) lives in omp's per-user daemon so that it works exactly while an omp process runs; the daemon's module list is a static array, so a module can only be added to the source. The module is a loader: the unit's code ships with the CGS extension and is imported from the path the opening client passes.
+Upstream: none.
+Remove-when: upstream lets extensions register daemon modules at runtime.
+---
+ .../src/daemon/modules/cgsconnect.ts          | 56 ++++++++++++++
+ .../coding-agent/src/daemon/modules/index.ts  |  2 +
+ .../test/daemon/cgsconnect-module.test.ts     | 76 +++++++++++++++++++
+ 3 files changed, 134 insertions(+)
+ create mode 100644 packages/coding-agent/src/daemon/modules/cgsconnect.ts
+ create mode 100644 packages/coding-agent/test/daemon/cgsconnect-module.test.ts
+
+diff --git a/packages/coding-agent/src/daemon/modules/cgsconnect.ts b/packages/coding-agent/src/daemon/modules/cgsconnect.ts
+new file mode 100644
+index 0000000000..ffb419b3ac
+--- /dev/null
++++ b/packages/coding-agent/src/daemon/modules/cgsconnect.ts
+@@ -0,0 +1,56 @@
++/**
++ * `cgsconnect` daemon module: the loader for the CGS remote-access unit (one per device).
++ *
++ * The unit itself (relay link, sessions, session host) is not part of omp: the client that opens it passes
++ * `params.impl`, the absolute path of a module that exports `open(stateDir, key, params)`, and the daemon imports it on
++ * first open. The unit lives while some omp process holds a lease on it, so remote access works exactly as long as an
++ * omp process runs. Calls are forwarded to the unit's `invoke(method, params)`.
++ */
++import * as fs from "node:fs";
++import * as path from "node:path";
++import { pathToFileURL } from "node:url";
++import { isRecord } from "@oh-my-pi/pi-utils";
++import type { DaemonModule, ModuleUnit } from "../module";
++import type { UnitPolicy } from "../protocol";
++
++/** Unit kind and `caps` key. */
++export const CGSCONNECT_KIND = "cgsconnect";
++/** Bumped on incompatible changes to the loader contract. */
++export const CGSCONNECT_VERSION = 1;
++
++const POLICY: UnitPolicy = { hold: "leases", idleMs: 0, onIdle: "stop", restart: "no", survive: "none" };
++
++/** A module unit that also answers named calls. */
++export interface CgsconnectUnit extends ModuleUnit {
++	invoke(method: string, params: unknown): Promise<unknown>;
++}
++
++interface CgsconnectImpl {
++	open(stateDir: string, key: string, params: unknown): Promise<CgsconnectUnit> | CgsconnectUnit;
++}
++
++async function loadImpl(params: unknown): Promise<CgsconnectImpl> {
++	const file = isRecord(params) ? params.impl : undefined;
++	if (typeof file !== "string" || !path.isAbsolute(file) || !fs.existsSync(file)) {
++		throw new Error("cgsconnect: params.impl must be the absolute path of an existing module");
++	}
++	const impl: unknown = await import(pathToFileURL(file).href);
++	if (!isRecord(impl) || typeof impl.open !== "function") {
++		throw new Error("cgsconnect: the module at params.impl does not export open()");
++	}
++	return impl as unknown as CgsconnectImpl;
++}
++
++export const cgsconnectModule: DaemonModule = {
++	kind: CGSCONNECT_KIND,
++	version: CGSCONNECT_VERSION,
++	policy: () => POLICY,
++	async open(context, request) {
++		const impl = await loadImpl(request.params);
++		return impl.open(context.stateDir, request.key, request.params);
++	},
++	async call(_context, method, params, _client, unit) {
++		if (!unit) throw new Error("cgsconnect: a call must name its unit");
++		return (unit.unit as CgsconnectUnit).invoke(method, params);
++	},
++};
+diff --git a/packages/coding-agent/src/daemon/modules/index.ts b/packages/coding-agent/src/daemon/modules/index.ts
+index 2184980092..a8b119ecab 100644
+--- a/packages/coding-agent/src/daemon/modules/index.ts
++++ b/packages/coding-agent/src/daemon/modules/index.ts
+@@ -2,6 +2,7 @@
+ import type { DaemonModule } from "../module";
+ import { agentsModule } from "./agents";
+ import { blobModule } from "./blob";
++import { cgsconnectModule } from "./cgsconnect";
+ import { disasmModule } from "./disasm";
+ import { inferModule } from "./infer";
+ import { lspModule } from "./lsp";
+@@ -24,4 +25,5 @@ export const DAEMON_MODULES: readonly DaemonModule[] = [
+ 	providerSlotsModule,
+ 	mcpModule,
+ 	transcriptsModule,
++	cgsconnectModule,
+ ];
+diff --git a/packages/coding-agent/test/daemon/cgsconnect-module.test.ts b/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
+new file mode 100644
+index 0000000000..efeb74791a
+--- /dev/null
++++ b/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
+@@ -0,0 +1,76 @@
++import { afterEach, beforeEach, expect, it } from "bun:test";
++import * as fs from "node:fs";
++import * as os from "node:os";
++import * as path from "node:path";
++import type { ModuleClient, ModuleContext, ModuleOpen } from "../../src/daemon/module";
++import { cgsconnectModule, type CgsconnectUnit } from "../../src/daemon/modules/cgsconnect";
++import { DAEMON_MODULES } from "../../src/daemon/modules";
++import { GLOBAL_SCOPE } from "../../src/daemon/protocol";
++
++const CLIENT: ModuleClient = { connectionId: "cgsconnect-test", pid: process.pid, build: "test" };
++
++let root: string;
++beforeEach(() => {
++	root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-cgsconnect-module-"));
++});
++afterEach(() => {
++	fs.rmSync(root, { recursive: true, force: true });
++});
++
++function context(): ModuleContext {
++	return { stateDir: path.join(root, "state") } as ModuleContext;
++}
++
++function openRequest(params: unknown): ModuleOpen {
++	return { unitId: "u1", scope: GLOBAL_SCOPE, key: "device-a", params, client: CLIENT };
++}
++
++function writeImpl(body: string): string {
++	const file = path.join(root, "impl.mjs");
++	fs.writeFileSync(file, body);
++	return file;
++}
++
++const IMPL = `
++export function open(stateDir, key, params) {
++	const exited = Promise.withResolvers();
++	return {
++		label: "device " + key,
++		ready: Promise.resolve(),
++		exited: exited.promise,
++		pids: () => [],
++		busy: () => false,
++		attach() {},
++		async stop() { exited.resolve({}); },
++		async invoke(method, args) { return { method, args, stateDir, key, seen: params.impl.endsWith("impl.mjs") }; },
++	};
++}`;
++
++it("is registered with the daemon", () => {
++	expect(DAEMON_MODULES.map(module => module.kind)).toContain("cgsconnect");
++});
++
++it("loads the unit from params.impl, keys it, and forwards calls to it", async () => {
++	const unit = (await cgsconnectModule.open(context(), openRequest({ impl: writeImpl(IMPL) }))) as CgsconnectUnit;
++	expect(unit.label).toBe("device device-a");
++	const reply = await cgsconnectModule.call?.(context(), "status", { a: 1 }, CLIENT, {
++		snapshot: {} as never,
++		unit,
++	});
++	expect(reply).toEqual({ method: "status", args: { a: 1 }, stateDir: path.join(root, "state"), key: "device-a", seen: true });
++});
++
++it("refuses an impl that is not an absolute path to a module with open()", async () => {
++	await expect(cgsconnectModule.open(context(), openRequest({}))).rejects.toThrow("params.impl");
++	await expect(cgsconnectModule.open(context(), openRequest({ impl: "relative.mjs" }))).rejects.toThrow("params.impl");
++	await expect(cgsconnectModule.open(context(), openRequest({ impl: path.join(root, "missing.mjs") }))).rejects.toThrow(
++		"params.impl",
++	);
++	await expect(cgsconnectModule.open(context(), openRequest({ impl: writeImpl("export const x = 1;") }))).rejects.toThrow(
++		"does not export open()",
++	);
++});
++
++it("holds the unit only while a process leases it", () => {
++	expect(cgsconnectModule.policy({})).toMatchObject({ hold: "leases", idleMs: 0, onIdle: "stop", survive: "none" });
++});
+-- 
+2.47.3
+

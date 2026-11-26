@@ -1,1 +1,15 @@
-{ "name": "@cgscli/connect", "version": "0.0.0", "type": "module", "license": "AGPL-3.0-only", "main": "src/index.ts", "dependencies": { "@cgscli/wire": "workspace:*" } }
+{
+  "name": "@cgscli/connect",
+  "version": "0.0.0",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@cgscli/wire": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./remote-daemon": "./src/remote/daemon/module.ts",
+    "./wire": "./src/remote/wire/index.ts"
+  }
+}
