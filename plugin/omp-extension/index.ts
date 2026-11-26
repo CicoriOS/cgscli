@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, applyCurrencyEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
 import { deviceLogin } from "./login.ts";
-import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type ProviderHubImpl } from "@cgscli/connect";
+import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type LayoutResult, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
@@ -160,6 +160,31 @@ export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<s
   return ids;
 }
 
+const LAYOUT_SYNC_REPORT: Record<LayoutResult, [string, "info" | "warning" | "error"]> = {
+  applied: ["Layout synced from the cloud.", "info"],
+  updated: ["Layout synced from the cloud; future updates will follow again.", "info"],
+  "up-to-date": ["Layout already matches the cloud.", "info"],
+  "user-managed": ["Layout is user-managed.", "warning"],
+  unavailable: ["Could not fetch the layout from the cloud; nothing was changed.", "error"],
+};
+
+/**
+ * `/agent layout sync`: apply the cloud layout over the user's own edits and follow the cloud again (ADR 0028). Roles the
+ * user added that the cloud does not know are left alone.
+ */
+export function registerAgentCommand(pi: ExtensionApi, o: { agentDir: string; fetch: (req: Request) => Promise<Response>; applyLayout?: typeof applyDefaultLayout }): void {
+  pi.registerCommand("agent", {
+    description: "layout sync: force the cloud's default model layout onto this machine",
+    handler: async (args, ctx) => {
+      if (args.trim().replace(/\s+/g, " ") !== "layout sync") return ctx.ui.notify("usage: /agent layout sync", "warning");
+      const account = readAccount(o.agentDir);
+      if (!account) return ctx.ui.notify("Not logged in to CGS: use /login first.", "error");
+      const result = await (o.applyLayout ?? applyDefaultLayout)({ agentDir: o.agentDir, baseUrl: account.baseUrl, clientSecret: account.clientSecret, fetch: o.fetch, force: true });
+      ctx.ui.notify(...LAYOUT_SYNC_REPORT[result]);
+    },
+  });
+}
+
 const SESSION_IDENTITY_HOOK = Symbol.for("cgscli.sessionIdentity");
 
 export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
@@ -175,6 +200,7 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
   pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
   registerRemoteCommands(pi);
+  registerAgentCommand(pi, { agentDir, fetch: (r) => connect.router.fetch(r) });
   divert((i, init) => connect.fetch(new Request(i, init)));
   // A stored account: the channels exist from the last known list at once, then the list and prices are refreshed in the background.
   const account = readAccount(agentDir);

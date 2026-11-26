@@ -1,5 +1,5 @@
-// Outbound proxy selection (ADR 0029). cgsconnect reads the standard variables, not omp's PI_PROXY family: HTTPS_PROXY for
-// https/wss, HTTP_PROXY for http/ws, ALL_PROXY as the fallback, NO_PROXY to opt hosts out (loopback always connects directly).
+// Outbound proxy selection (ADR 0029). Same order as omp's provider fetches, minus the per-provider form: PI_PROXY first, then
+// HTTPS_PROXY for https/wss or HTTP_PROXY for http/ws, then ALL_PROXY; NO_PROXY opts hosts out (loopback always connects directly).
 // Bun's fetch would pick the variables up by itself, but WebSocket and tls.connect do not, so every request path asks here
 // and passes the result explicitly.
 
@@ -30,7 +30,7 @@ function bypassed(url: URL, list: string): boolean {
 export function proxyFor(url: URL, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (LOOPBACK.has(url.hostname)) return undefined;
   const secure = url.protocol === "https:" || url.protocol === "wss:";
-  const raw = secure ? first(env, "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy") : first(env, "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy");
+  const raw = first(env, "PI_PROXY") ?? (secure ? first(env, "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy") : first(env, "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"));
   if (!raw) return undefined;
   const noProxy = first(env, "NO_PROXY", "no_proxy");
   if (noProxy && bypassed(url, noProxy)) return undefined;

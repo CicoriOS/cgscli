@@ -13,8 +13,10 @@ test("https and wss use HTTPS_PROXY, http and ws use HTTP_PROXY, ALL_PROXY is th
   expect(at("https://a.example", {})).toBeUndefined();
 });
 
-test("PI_PROXY is not read, a scheme-less value means http, an unsupported scheme means no proxy", () => {
-  expect(at("https://a.example", { PI_PROXY: "http://pi:1", PI_PROXY_CGS: "http://pi:2" })).toBeUndefined();
+test("PI_PROXY wins over the standard variables, the per-provider form is not read, a scheme-less value means http, an unsupported scheme means no proxy", () => {
+  expect(at("https://a.example", { PI_PROXY: "http://pi:1", HTTPS_PROXY: "http://s:2" })).toBe("http://pi:1");
+  expect(at("http://a.example", { PI_PROXY: "http://pi:1", HTTP_PROXY: "http://p:2" })).toBe("http://pi:1");
+  expect(at("https://a.example", { PI_PROXY_CGS: "http://pi:2" })).toBeUndefined();
   expect(at("https://a.example", { HTTPS_PROXY: "127.0.0.1:7890" })).toBe("http://127.0.0.1:7890");
   expect(at("https://a.example", { HTTPS_PROXY: "socks5://127.0.0.1:1080" })).toBeUndefined();
 });

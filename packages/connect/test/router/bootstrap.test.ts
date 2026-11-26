@@ -34,11 +34,11 @@ test("a preferred candidate that is too slow is passed over once the patience ru
   expect((await bootstrap([new URL(dead()), new URL(fast)], { direct, patienceMs: 3000 }))?.origin).toBe(new URL(fast).origin);
 });
 
-test("Bootstrap probes and requests leave through the proxy named by HTTP_PROXY, not PI_PROXY; loopback and NO_PROXY hosts go direct", async () => {
+test("Bootstrap probes and requests leave through the proxy named by PI_PROXY (ahead of HTTP_PROXY); loopback and NO_PROXY hosts go direct", async () => {
   const seen: string[] = [];
   const proxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { seen.push(req.url); return new Response("ok", { headers: { "x-cgs-origin": "1" } }); } });
   servers.push(proxy);
-  const env = { HTTP_PROXY: `http://127.0.0.1:${proxy.port}`, PI_PROXY: "http://127.0.0.1:1", NO_PROXY: "skip.invalid" };
+  const env = { PI_PROXY: `http://127.0.0.1:${proxy.port}`, HTTP_PROXY: "http://127.0.0.1:1", NO_PROXY: "skip.invalid" };
   const r = createRouter({ upstream: ["http://a.invalid", "http://b.invalid"], env, cloudflare: { enabled: true } });
   await r.ready();
   expect(r.upstream()).toBe("http://a.invalid");

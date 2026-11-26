@@ -5,7 +5,7 @@ import path from "node:path";
 import YAML from "yaml";
 import { createConnect, applyDefaultLayout, normalizeLayout, seedDistributionDefaults, DISABLED_PROVIDERS, resolveAgentDir } from "@cgscli/connect";
 import { readAccount } from "../account.ts";
-import { syncAccount } from "../index.ts";
+import { registerAgentCommand, syncAccount } from "../index.ts";
 
 const dirs: string[] = [];
 const tmp = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "cgs-acct-")); dirs.push(d); return d; };
@@ -158,6 +158,25 @@ test("layout: a config written by a client that predates takeover tracking is fo
   fs.writeFileSync(f2, fs.readFileSync(f2, "utf8").replace("claude-a:off", "mine"));
   fs.writeFileSync(s2, JSON.stringify({ defaultsApplied: true }));
   expect(await applyDefaultLayout(at(edited, NEXT))).toBe("user-managed");
+});
+
+test("/agent layout sync overwrites the user's edits, clears the takeover and follows the cloud again", async () => {
+  const agentDir = tmp(), p = pi(), s = server();
+  const file = path.join(agentDir, "config.yml"), state = path.join(agentDir, "cgs", "state.json");
+  await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("cgs-openai/deepseek-x:max", "cgs-openai/mine"));
+  await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
+  expect(JSON.parse(fs.readFileSync(state, "utf8")).layoutTakeover).toBeTruthy();
+  const notes: string[] = [], cmds: Record<string, { handler(args: string, ctx: unknown): Promise<void> }> = {};
+  registerAgentCommand({ ...p.api, registerCommand: (n: string, o: never) => { cmds[n] = o; } }, { agentDir, fetch: (r) => s.connect.router.fetch(r) });
+  const ctx = { ui: { notify: (m: string, l?: string) => notes.push(`${l}: ${m}`) } };
+  await cmds.agent!.handler("layout  sync", ctx);
+  expect(YAML.parse(fs.readFileSync(file, "utf8")).task.agentModelOverrides.task).toBe("cgs-openai/deepseek-x:max");
+  expect(JSON.parse(fs.readFileSync(state, "utf8")).layoutTakeover).toBeUndefined();
+  expect(notes[0]).toStartWith("info:");
+  await cmds.agent!.handler("layout", ctx);
+  expect(notes[1]).toContain("usage: /agent layout sync");
+  s.connect.stop();
 });
 
 test("layout: a failed or unusable response leaves the marker unset so the next login retries", async () => {

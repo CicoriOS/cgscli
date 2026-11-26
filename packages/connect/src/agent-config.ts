@@ -183,6 +183,8 @@ export interface ApplyLayoutOptions {
   clientSecret: string;
   fetch: (req: Request) => Promise<Response>;
   signal?: AbortSignal;
+  /** `/agent layout sync`: apply the cloud layout over whatever config.yml says and clear any takeover, then follow again. */
+  force?: boolean;
 }
 
 export type LayoutResult = "applied" | "updated" | "up-to-date" | "user-managed" | "unavailable";
@@ -192,11 +194,12 @@ export type LayoutResult = "applied" | "updated" | "up-to-date" | "user-managed"
  * config.yml (a model role, an agent override, the web fallback chain) every login or start applies what the cloud now
  * says. The first difference from what this client last wrote marks the agent dir `layoutTakeover` in state.json, for good:
  * from then on nothing is fetched and nothing is rewritten. The check reads only local files, so it works offline.
- * A failed fetch or an unusable layout changes nothing; the next login or start tries again.
+ * A failed fetch or an unusable layout changes nothing; the next login or start tries again. With `force` the user's edits
+ * are overwritten and the takeover is cleared, so the dir follows the cloud again.
  */
 export async function applyDefaultLayout(o: ApplyLayoutOptions): Promise<LayoutResult> {
   const state = readState(o.agentDir);
-  if (state.layoutTakeover) return "user-managed";
+  if (state.layoutTakeover && !o.force) return "user-managed";
   const file = configFile(o.agentDir);
   const prior = state.layout as LayoutState | undefined;
   const takeOver = (reason: string): LayoutResult => {
@@ -204,13 +207,13 @@ export async function applyDefaultLayout(o: ApplyLayoutOptions): Promise<LayoutR
     return "user-managed";
   };
 
-  if (prior && stable(managedOf(loadDoc(file).doc)) !== stable(prior.snapshot)) return takeOver("a layout-managed role was changed in config.yml");
+  if (!o.force && prior && stable(managedOf(loadDoc(file).doc)) !== stable(prior.snapshot)) return takeOver("a layout-managed role was changed in config.yml");
   const layout = await fetchLayout(o);
   if (!layout) return "unavailable";
   const hash = createHash("sha256").update(stable(layout)).digest("hex");
   const { doc, text } = loadDoc(file);
 
-  if (!prior && state.defaultsApplied === true) {
+  if (!o.force && !prior && state.defaultsApplied === true) {
     // Installed before ADR 0028: follow only when the config is exactly what this layout writes.
     const probe = YAML.parseDocument(text);
     applyLayoutToDocument(probe, layout);
@@ -218,10 +221,10 @@ export async function applyDefaultLayout(o: ApplyLayoutOptions): Promise<LayoutR
     writeState(o.agentDir, { defaultsApplied: undefined, layout: { hash, applied: layout, snapshot: managedOf(doc) } satisfies LayoutState });
     return "up-to-date";
   }
-  if (prior?.hash === hash) return "up-to-date";
+  if (!o.force && prior?.hash === hash) return "up-to-date";
 
   applyLayoutToDocument(doc, layout, prior?.applied);
   saveDoc(file, doc, text);
-  writeState(o.agentDir, { defaultsApplied: undefined, layout: { hash, applied: layout, snapshot: managedOf(doc) } satisfies LayoutState });
+  writeState(o.agentDir, { defaultsApplied: undefined, layoutTakeover: undefined, layout: { hash, applied: layout, snapshot: managedOf(doc) } satisfies LayoutState });
   return prior ? "updated" : "applied";
 }
