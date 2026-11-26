@@ -1,0 +1,326 @@
+From ef27550dd378967baf0c3c80696637dc17f0d8a6 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Thu, 26 Nov 2026 22:53:29 +0800
+Subject: [PATCH] P16: update from the cgscli GitHub release
+
+Reason: A CGS build must update from the cgscli release, never from omp's channels (they would replace it with upstream omp). The source, the installer and the verification are inside update-cli and the startup check, which the extension API cannot reach.
+Upstream: none (distribution-specific update source)
+Remove-when: CGS stops shipping a branded omp build
+
+- cli/cgs-release.ts: reads `latest.json` beside the newest release's assets (CGS_RELEASE_URL replaces the base) and validates it
+- `cgs update` and `--check`: compare with the running version, install the release's `cgscli` tarball with `bun install -g`, verify through the `cgs` launcher
+- startup check and auto-update offer only that release; the notice says `cgs update`
+- replaces the P4 gate that disabled updating unless PI_BUILD_URL was set
+---
+ packages/coding-agent/src/cli/cgs-release.ts  | 50 ++++++++++++++++++
+ packages/coding-agent/src/cli/update-cli.ts   | 47 ++++++++++++++---
+ packages/coding-agent/src/main.ts             | 23 +++-----
+ .../src/modes/interactive/update-notice.tsx   |  2 +-
+ .../coding-agent/test/cgs-release.test.ts     | 52 +++++++++++++++++++
+ packages/coding-agent/test/update-cli.test.ts | 16 +++---
+ 6 files changed, 158 insertions(+), 32 deletions(-)
+ create mode 100644 packages/coding-agent/src/cli/cgs-release.ts
+ create mode 100644 packages/coding-agent/test/cgs-release.test.ts
+
+diff --git a/packages/coding-agent/src/cli/cgs-release.ts b/packages/coding-agent/src/cli/cgs-release.ts
+new file mode 100644
+index 0000000000..030820abc2
+--- /dev/null
++++ b/packages/coding-agent/src/cli/cgs-release.ts
+@@ -0,0 +1,50 @@
++/**
++ * CGS release source: where `cgs update` and the startup update check look for a newer build.
++ *
++ * A release of cgscli is a GitHub release whose assets are npm tarballs plus a `latest.json` describing the newest one:
++ * `{ "version": "19.2.1-cgs.3", "tarball": "https://github.com/<owner>/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz" }`.
++ * `latest.json` is read from `<release url>/latest.json`; `releases/latest/download/` redirects to the newest release, so no
++ * API (and no API rate limit) is involved. Omp's own channels (npm, the build service) are never asked: they would replace
++ * this build with upstream omp. `CGS_RELEASE_URL` replaces the base (a mirror, or a local server in tests).
++ */
++import { $env, VERSION } from "@oh-my-pi/pi-utils";
++
++/** Where the newest release's assets live when `CGS_RELEASE_URL` is unset. */
++export const CGS_RELEASE_URL = "https://github.com/CicoriOS/cgscli/releases/latest/download";
++
++export interface CgsRelease {
++	/** `<omp version>-cgs.<n>`. */
++	version: string;
++	/** The `cgscli` package tarball `bun install -g` installs. */
++	tarball: string;
++}
++
++const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
++const LOOPBACK_HOSTS: Record<string, true> = { localhost: true, "127.0.0.1": true, "[::1]": true };
++
++/** The release description `latest.json` holds. Throws on anything else: a wrong answer must never reach the installer. */
++export function parseCgsRelease(data: unknown): CgsRelease {
++	if (typeof data !== "object" || data === null || !("version" in data) || !("tarball" in data)) {
++		throw new Error("latest.json must hold a version and a tarball");
++	}
++	const { version, tarball } = data;
++	if (typeof version !== "string" || !VERSION_RE.test(version)) throw new Error("latest.json has an invalid version");
++	if (typeof tarball !== "string") throw new Error("latest.json has an invalid tarball");
++	const url = new URL(tarball);
++	// Plain http only for a local test server: the tarball is code that is about to be installed.
++	if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS[url.hostname])) {
++		throw new Error(`latest.json names a tarball that is not https: ${tarball}`);
++	}
++	return { version, tarball };
++}
++
++/** The newest CGS release. */
++export async function fetchCgsRelease(timeoutMs = 30_000): Promise<CgsRelease> {
++	const base = ($env.CGS_RELEASE_URL ?? "").trim().replace(/\/+$/, "") || CGS_RELEASE_URL;
++	const response = await fetch(`${base}/latest.json`, {
++		signal: AbortSignal.timeout(timeoutMs),
++		headers: { "user-agent": `cgs/${VERSION}` },
++	});
++	if (!response.ok) throw new Error(`${base}/latest.json answered HTTP ${response.status}`);
++	return parseCgsRelease(await response.json());
++}
+diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
+index 9a2f5c55c1..012d653f5f 100644
+--- a/packages/coding-agent/src/cli/update-cli.ts
++++ b/packages/coding-agent/src/cli/update-cli.ts
+@@ -42,6 +42,7 @@ import {
+ 	fetchBuild,
+ 	type UpdateChannel,
+ } from "./build-service";
++import { type CgsRelease, fetchCgsRelease } from "./cgs-release";
+ import { managedInstallName } from "./managed-install";
+ import {
+ 	DEFAULT_NPM_REGISTRY,
+@@ -1087,7 +1088,7 @@ async function validateExistingUpdateTarget(targetPath: string): Promise<void> {
+ export async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
+ 	// A fresh lookup: the install may have moved what PATH resolves to (a Windows
+ 	// shim takeover retires `omp.cmd` for `omp.exe`) since the target was resolved.
+-	const ompPath = $which(APP_NAME, { cache: WhichCachePolicy.Fresh }) ?? undefined;
++	const ompPath = $which("cgs", { cache: WhichCachePolicy.Fresh }) ?? undefined;
+ 	if (!ompPath) return { ok: false };
+ 	const binaryPath = tryRealpath(ompPath) ?? ompPath;
+ 	return await verifyBinaryAtPath(binaryPath, expectedVersion);
+@@ -2319,6 +2320,43 @@ async function runManagedUpdate(
+ 	return { kind: "installed", version: installed };
+ }
+ 
++/**
++ * Update from the newest cgscli release (see {@link fetchCgsRelease}): the release's `cgscli` tarball is installed with
++ * `bun install -g`, which replaces the global package and every tarball it depends on.
++ */
++async function runCgsUpdate(opts: UpdateOptions): Promise<UpdateOutcome> {
++	console.log(chalk.dim(`Current version: ${VERSION}`));
++	const request: UpdateRequest = {
++		force: opts.force,
++		check: opts.check,
++		channel: "stable",
++		isChannelSwitch: false,
++		persistChannel: false,
++		onProgress: opts.onProgress,
++	};
++	let release: CgsRelease;
++	try {
++		release = await fetchCgsRelease();
++	} catch (err) {
++		throw updateError("Failed to check for updates", err);
++	}
++	if (!announceOffer(release.version, request)) return { kind: "current" };
++	if (request.check) return { kind: "available", version: release.version };
++
++	const lock = acquireInstallLock();
++	try {
++		request.onProgress?.({ phase: "installing", version: release.version });
++		const exitCode = await runInstaller(["bun", "install", "-g", release.tarball]);
++		if (exitCode !== 0) throw new Error(`bun install failed with exit code ${exitCode}`);
++		await finishVerifiedUpdate(await verifyInstalledVersion(release.version), release.version);
++	} catch (err) {
++		throw updateError("Update failed", err);
++	} finally {
++		lock.release();
++	}
++	return { kind: "installed", version: release.version };
++}
++
+ /**
+  * Run the update command.
+  *
+@@ -2331,11 +2369,8 @@ async function runManagedUpdate(
+  * fails, or when another update holds the install lock.
+  */
+ export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
+-	if (!$env.PI_BUILD_URL?.trim()) {
+-		const reason = "This is the CGS build of omp; set PI_BUILD_URL to a CGS build service to update it.";
+-		console.log(chalk.yellow(reason));
+-		return { kind: "unsupported", reason };
+-	}
++	// CGS build: the only source is the cgscli GitHub release (P16); omp's own channels stay unreachable below.
++	return await runCgsUpdate(opts);
+ 	const ompPath = resolveOmpPath();
+ 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
+ 	if (manager) {
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 545f688a32..a461de03ab 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -22,7 +22,7 @@ import {
+ 	setProjectDir,
+ 	VERSION,
+ } from "@oh-my-pi/pi-utils/dirs";
+-import { $env, isBunTestRuntime, isCompiledBinary, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
++import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+ import * as logger from "@oh-my-pi/pi-utils/logger";
+ import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+ import { fuzzyFilter } from "./utils/fuzzy";
+@@ -44,11 +44,10 @@ import { buildInitialMessage } from "./cli/initial-message";
+ import { KeybindingsManager } from "./config/keybindings/keybindings";
+ import { formatKeyHint } from "./ui/keys/hints";
+ import type { SessionPickerOptions } from "./modes/view-model/apps/session-picker";
+-import { fetchBuild } from "./cli/build-service";
++import { fetchCgsRelease } from "./cli/cgs-release";
+ import { applyStartupCwd } from "./cli/startup-cwd";
+ import { runAutoUpdate } from "./cli/auto-update";
+-import { managedInstallName } from "./cli/managed-install";
+-import { getLatestRelease, isSourceCheckout } from "./cli/update-cli";
++import { isSourceCheckout } from "./cli/update-cli";
+ import { findConfigFile } from "./config";
+ import { cfgNoJudge, cfgNoSpotlight, cfgOffline } from "./config/auxiliary-model-policy";
+ import { ModelRegistry } from "./config/model-registry";
+@@ -180,7 +179,6 @@ import {
+ 	cfgTuiMaxFps,
+ 	cfgTuiMotion,
+ 	cfgUpdateAuto,
+-	cfgUpdateChannel,
+ } from "./modes/settings";
+ import {
+ 	cfgDefaultThinkingLevel,
+@@ -274,18 +272,9 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
+ 		return;
+ 	}
+ 	try {
+-		// Branded build: without a CGS build service (PI_BUILD_URL) there is no source to update from, and the
+-		// stock omp registry/build service would replace this build with upstream omp.
+-		if (!$env.PI_BUILD_URL?.trim()) return;
+-		// Checkouts update through git and a manager (Tern) updates its omp itself:
+-		// "run omp update" would be wrong advice for both.
+-		if (isSourceCheckout() || (await managedInstallName(process.execPath))) return;
+-		const channel = cfgUpdateChannel.get(settings);
+-		// A compiled binary updates from the build service; naming the running
+-		// version lets the service prepare the patch `omp update` will then use.
+-		const { version } = isCompiledBinary()
+-			? await fetchBuild({ channel }, { timeoutMs: 5_000, fromVersion: currentVersion })
+-			: await getLatestRelease({ timeoutMs: 5_000, channel });
++		// CGS build: the only source is the cgscli release (P16). Checkouts update through git.
++		if (isSourceCheckout()) return;
++		const { version } = await fetchCgsRelease(5_000);
+ 		return Bun.semver.order(version, currentVersion) > 0 ? version : undefined;
+ 	} catch {
+ 		return undefined;
+diff --git a/packages/coding-agent/src/modes/interactive/update-notice.tsx b/packages/coding-agent/src/modes/interactive/update-notice.tsx
+index b606fa44e6..92349efda7 100644
+--- a/packages/coding-agent/src/modes/interactive/update-notice.tsx
++++ b/packages/coding-agent/src/modes/interactive/update-notice.tsx
+@@ -10,7 +10,7 @@ import { bold } from "@oh-my-pi/pi-tui/theme/theme";
+ import { AnsiText } from "../../ui/transcript/ansi-text";
+ import { Notice } from "../../ui/transcript/messages/notices";
+ 
+-const UPDATE_COMMAND = "omp update";
++const UPDATE_COMMAND = "cgs update";
+ 
+ export function UpdateNotice(props: { readonly version: string }): JSXNode {
+ 	const prefix = `New version ${props.version} is available. Run: `;
+diff --git a/packages/coding-agent/test/cgs-release.test.ts b/packages/coding-agent/test/cgs-release.test.ts
+new file mode 100644
+index 0000000000..e88c335e7f
+--- /dev/null
++++ b/packages/coding-agent/test/cgs-release.test.ts
+@@ -0,0 +1,52 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import { fetchCgsRelease, parseCgsRelease } from "../src/cli/cgs-release";
++
++describe("parseCgsRelease", () => {
++	test("accepts a version with the cgs suffix and an https tarball", () => {
++		expect(parseCgsRelease({ version: "19.2.1-cgs.3", tarball: "https://github.com/x/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz" })).toEqual({
++			version: "19.2.1-cgs.3",
++			tarball: "https://github.com/x/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz",
++		});
++	});
++
++	test("allows plain http only for a loopback server", () => {
++		expect(parseCgsRelease({ version: "1.0.0", tarball: "http://127.0.0.1:8123/cgscli.tgz" }).tarball).toBe("http://127.0.0.1:8123/cgscli.tgz");
++		expect(() => parseCgsRelease({ version: "1.0.0", tarball: "http://example.com/cgscli.tgz" })).toThrow("not https");
++	});
++
++	test("refuses anything that is not a version and a tarball", () => {
++		expect(() => parseCgsRelease(null)).toThrow();
++		expect(() => parseCgsRelease({ version: "1.0.0" })).toThrow();
++		expect(() => parseCgsRelease({ version: "latest", tarball: "https://x/y.tgz" })).toThrow("invalid version");
++		expect(() => parseCgsRelease({ version: "1.0.0", tarball: 5 })).toThrow("invalid tarball");
++	});
++});
++
++describe("fetchCgsRelease", () => {
++	const saved = process.env.CGS_RELEASE_URL;
++	afterEach(() => {
++		if (saved === undefined) delete process.env.CGS_RELEASE_URL;
++		else process.env.CGS_RELEASE_URL = saved;
++	});
++
++	test("reads latest.json from CGS_RELEASE_URL and sends no omp channel request", async () => {
++		const seen: string[] = [];
++		using server = Bun.serve({
++			port: 0,
++			hostname: "127.0.0.1",
++			fetch(req) {
++				seen.push(new URL(req.url).pathname);
++				return Response.json({ version: "19.2.1-cgs.2", tarball: `http://127.0.0.1:${server.port}/cgscli-19.2.1-cgs.2.tgz` });
++			},
++		});
++		process.env.CGS_RELEASE_URL = `http://127.0.0.1:${server.port}/releases/`;
++		expect((await fetchCgsRelease()).version).toBe("19.2.1-cgs.2");
++		expect(seen).toEqual(["/releases/latest.json"]);
++	});
++
++	test("a missing release is an error naming the status", async () => {
++		using server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("nope", { status: 404 }) });
++		process.env.CGS_RELEASE_URL = `http://127.0.0.1:${server.port}`;
++		await expect(fetchCgsRelease()).rejects.toThrow("HTTP 404");
++	});
++});
+diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
+index 62cd2dc664..86d80b409b 100644
+--- a/packages/coding-agent/test/update-cli.test.ts
++++ b/packages/coding-agent/test/update-cli.test.ts
+@@ -1710,23 +1710,23 @@ describe("update-cli concurrent binary updates", () => {
+ });
+ 
+ describe("verifyInstalledVersion", () => {
+-	// A Windows shim takeover retires the launcher PATH first resolved (`omp.cmd`)
+-	// for one later on PATH (`omp.exe`); the check must follow it, not a cached path.
++	// The CGS build is verified through its `cgs` launcher (which still reports `omp/<version>`). A Windows shim takeover
++	// retires the launcher PATH first resolved (`cgs.cmd`) for one later on PATH (`cgs.exe`); the check must follow it.
+ 	it.skipIf(process.platform === "win32")("re-resolves PATH after an install moves the launcher", async () => {
+ 		const [first, second] = [await makeTempDir(), await makeTempDir()];
+-		await Bun.write(path.join(first, "omp"), "#!/bin/sh\necho omp/1.0.0\n");
+-		await Bun.write(path.join(second, "omp"), "#!/bin/sh\necho omp/2.0.0\n");
+-		await fs.chmod(path.join(first, "omp"), 0o755);
+-		await fs.chmod(path.join(second, "omp"), 0o755);
++		await Bun.write(path.join(first, "cgs"), "#!/bin/sh\necho omp/1.0.0\n");
++		await Bun.write(path.join(second, "cgs"), "#!/bin/sh\necho omp/2.0.0\n");
++		await fs.chmod(path.join(first, "cgs"), 0o755);
++		await fs.chmod(path.join(second, "cgs"), 0o755);
+ 		const originalPath = process.env.PATH;
+ 		process.env.PATH = [first, second, originalPath].join(path.delimiter);
+ 		try {
+ 			expect((await verifyInstalledVersion("2.0.0")).actual).toBe("1.0.0");
+-			await fs.rm(path.join(first, "omp"));
++			await fs.rm(path.join(first, "cgs"));
+ 			expect(await verifyInstalledVersion("2.0.0")).toEqual({
+ 				ok: true,
+ 				actual: "2.0.0",
+-				path: path.join(second, "omp"),
++				path: path.join(second, "cgs"),
+ 			});
+ 		} finally {
+ 			process.env.PATH = originalPath;
+-- 
+2.47.3
+
