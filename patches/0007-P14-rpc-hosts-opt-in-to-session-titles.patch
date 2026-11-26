@@ -1,4 +1,4 @@
-From 1c4dbe767d7822dff0bc6507656c936cd41dd45a Mon Sep 17 00:00:00 2001
+From 4fd8dcd200d82c77fe955e6d4e72ceb2955379f1 Mon Sep 17 00:00:00 2001
 From: t <a@b.c>
 Date: Thu, 26 Nov 2026 12:55:49 +0800
 Subject: [PATCH 7/7] P14: RPC hosts opt in to session titles
@@ -8,8 +8,8 @@ Upstream: none.
 Remove-when: upstream adds a host opt-in for automatic session title generation.
 ---
  docs/rpc.md                       | 10 +++++-----
- packages/coding-agent/src/main.ts |  5 ++---
- 2 files changed, 7 insertions(+), 8 deletions(-)
+ packages/coding-agent/src/main.ts |  7 +++----
+ 2 files changed, 8 insertions(+), 9 deletions(-)
 
 diff --git a/docs/rpc.md b/docs/rpc.md
 index 5f4aa6835f..8e5f825caf 100644
@@ -40,7 +40,7 @@ index 5f4aa6835f..8e5f825caf 100644
  Example:
  
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 7136856262..429fa8efea 100644
+index 7136856262..545f688a32 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
 @@ -2185,9 +2185,8 @@ export async function runRootCommand(
@@ -55,6 +55,15 @@ index 7136856262..429fa8efea 100644
  		) {
  			Bun.env.PI_NO_TITLE = "1";
  		}
+@@ -2548,7 +2547,7 @@ export async function runRootCommand(
+ 			options.allowSessionModelFallback = isInteractive;
+ 			options.settingsApproval = isInteractive;
+ 			options.tuiTranscript = isInteractive;
+-			options.autoTitle = isInteractive;
++			options.autoTitle = isInteractive || ((mode === "rpc" || mode === "rpc-ui" || mode === "acp") && !Bun.env.PI_NO_TITLE);
+ 			options.deferHintCompression = isInteractive;
+ 			options.settings = settingsInstance;
+ 			options.telemetry = startupTelemetry;
 -- 
 2.47.3
 

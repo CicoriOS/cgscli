@@ -135,6 +135,7 @@ function onFrame(text) {
     case "tool_execution_end": onToolEnd(f); break;
     case "prompt_result": onPromptResult(f); break;
     case "session_settled": onSettled(); break;
+    case "extension_ui_request": if (f.method === "setTitle") refreshTree(); break; // omp named the session (PI_RPC_EMIT_TITLE): the title itself is read from the session file
     case "btw_record": onBtwRecord(f.record); break;
     case "btw_delta": onBtwDelta(f); break;
   }
@@ -634,6 +635,26 @@ async function refreshTree() {
   const cur = S.workspaces.flatMap((w) => w.sessions).find((s) => s.path === S.sessionFile);
   if (cur) setTitle(cur.title);
 }
+
+/** Click the title to rename the session: Enter saves through omp's set_session_name, Esc cancels. omp never overwrites a name set this way. */
+$("#title").onclick = () => {
+  const span = $("#title");
+  if (!S.title || span.querySelector("input")) return;
+  const input = h("input", { class: "title-edit", value: S.title, maxlength: "120" });
+  let done = false;
+  const finish = async (save) => {
+    if (done) return;
+    done = true;
+    const name = input.value.trim();
+    if (save && name && name !== S.title) {
+      try { await rpc({ type: "set_session_name", name }); setTitle(name); await refreshTree(); } catch (e) { toast(String(e.message ?? e)); setTitle(S.title); }
+    } else setTitle(S.title);
+  };
+  input.onkeydown = (e) => { if (e.key === "Enter" && !e.isComposing) finish(true); else if (e.key === "Escape") finish(false); };
+  input.onblur = () => finish(true);
+  span.replaceChildren(input);
+  input.focus(); input.select();
+};
 
 function renderTree() {
   const tree = $("#tree");
