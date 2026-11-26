@@ -1,18 +1,38 @@
-From 4fd8dcd200d82c77fe955e6d4e72ceb2955379f1 Mon Sep 17 00:00:00 2001
+From 268b6d7e0a9aa020c395fc7acd3a1bc02def2093 Mon Sep 17 00:00:00 2001
 From: t <a@b.c>
 Date: Thu, 26 Nov 2026 12:55:49 +0800
 Subject: [PATCH 7/7] P14: RPC hosts opt in to session titles
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
-Reason: RPC hosts such as the web client and cgsconnect want omp-generated session titles.
+Reason: RPC hosts such as the web client and cgsconnect want omp-generated session titles and need the set_title_language command to match the user’s UI language.
 Upstream: none.
-Remove-when: upstream adds a host opt-in for automatic session title generation.
+Remove-when: upstream adds a host opt-in for automatic session title generation and lets hosts set the title language.
 ---
- docs/rpc.md                       | 10 +++++-----
- packages/coding-agent/src/main.ts |  7 +++----
- 2 files changed, 8 insertions(+), 9 deletions(-)
+ docs/rpc.md                                   | 11 +++--
+ packages/coding-agent/src/main.ts             |  7 ++-
+ .../coding-agent/src/modes/rpc/rpc-mode.ts    |  8 ++++
+ .../coding-agent/src/modes/rpc/rpc-types.ts   |  2 +
+ .../src/modes/rpc/wire/commands.ts            |  6 +++
+ .../src/modes/rpc/wire/rpc-wire.generated.ts  |  9 ++++
+ .../src/modes/rpc/wire/rpc-wire.schema.json   | 47 +++++++++++++++++++
+ .../src/prompts/system/title-card.md          |  3 ++
+ .../src/prompts/system/title-fork.md          |  3 ++
+ .../system/title-marker-instruction.md        |  3 ++
+ .../src/prompts/system/title-system.md        |  3 ++
+ .../coding-agent/src/session/agent-session.ts | 17 ++++++-
+ packages/coding-agent/src/tiny/text.ts        |  2 +-
+ .../coding-agent/src/utils/title-generator.ts | 25 +++++++---
+ packages/coding-agent/test/title-card.test.ts |  9 ++++
+ .../coding-agent/test/title-generator.test.ts | 24 ++++++++++
+ sdk/go/omp-rpc/wire.go                        | 31 ++++++++++++
+ sdk/python/omp-rpc/src/omp_rpc/_wire.py       | 20 ++++++++
+ sdk/rust/omp-rpc/src/wire.rs                  | 29 ++++++++++++
+ 19 files changed, 241 insertions(+), 18 deletions(-)
 
 diff --git a/docs/rpc.md b/docs/rpc.md
-index 5f4aa6835f..8e5f825caf 100644
+index 5f4aa6835f..4a952a304d 100644
 --- a/docs/rpc.md
 +++ b/docs/rpc.md
 @@ -26,7 +26,7 @@ Behavior notes:
@@ -24,7 +44,15 @@ index 5f4aa6835f..8e5f825caf 100644
  - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
  - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
  - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-@@ -1367,10 +1367,10 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
+@@ -256,6 +256,7 @@ correlate it via `id`. Ordering across concurrent commands is not guaranteed
+ - `{ id?, type: "get_branch_messages" }`
+ - `{ id?, type: "get_last_assistant_text" }`
+ - `{ id?, type: "set_session_name", name: string }`
++- `{ id?, type: "set_title_language", language: string | null }` → `data: { language: string | null }`: sets the language for future generated title text (e.g. `"Chinese (Simplified)"`). Pass `null` or `"English"` for the default. This setting lasts for the RPC process, is not saved to session files, and does not rename existing sessions or enable title generation. Card icons and codes keep their usual format.
+ - `{ id?, type: "handoff", customInstructions?: string }`
+ 
+ `handoff` fails while a response is streaming. On success, its payload is `{ savedPath? }` or `null` when no handoff was produced. Session transitions (`new_session`, `switch_session`, `branch`, `fork`, `open_session`) report cancellation when an extension prevents the transition.
+@@ -1367,10 +1368,10 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
  
  Runtime note:
  
@@ -64,6 +92,591 @@ index 7136856262..545f688a32 100644
  			options.deferHintCompression = isInteractive;
  			options.settings = settingsInstance;
  			options.telemetry = startupTelemetry;
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+index adff20fd17..403058b9cf 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -2931,6 +2931,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 				}
+ 				return success(id, "set_session_name");
+ 			}
++			case "set_title_language": {
++				const language = typeof command.language === "string" ? command.language.trim() : command.language;
++				if (language !== null && (typeof language !== "string" || !language || /[\r\n]/.test(language))) {
++					return error(id, "set_title_language", "Title language must be a non-empty, single-line string or null");
++				}
++				session.setTitleLanguage(language);
++				return success(id, "set_title_language", { language });
++			}
+ 
+ 			case "handoff": {
+ 				await session.compact(command.customInstructions, { mode: "handoff" });
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-types.ts b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+index f41a8d4679..2137afeb07 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-types.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-types.ts
+@@ -151,6 +151,7 @@ export type RpcCommand =
+ 	| { id?: string; type: "get_branch_messages" }
+ 	| { id?: string; type: "get_last_assistant_text" }
+ 	| { id?: string; type: "set_session_name"; name: string }
++	| { id?: string; type: "set_title_language"; language: string | null }
+ 	| { id?: string; type: "handoff"; customInstructions?: string }
+ 
+ 	// Messages
+@@ -647,6 +648,7 @@ export type RpcResponse =
+ 			data: { text: string | null };
+ 	  }
+ 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
++	| { id?: string; type: "response"; command: "set_title_language"; success: true; data: { language: string | null } }
+ 	// Live voice
+ 	| { id?: string; type: "response"; command: "live_start"; success: true; data: { voice: string } }
+ 	| {
+diff --git a/packages/coding-agent/src/modes/rpc/wire/commands.ts b/packages/coding-agent/src/modes/rpc/wire/commands.ts
+index 9074becae5..8b8feaee86 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/commands.ts
++++ b/packages/coding-agent/src/modes/rpc/wire/commands.ts
+@@ -367,6 +367,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
+ 		unwrap: "text",
+ 	},
+ 	{ name: "set_session_name", doc: "Rename the session.", params: { name: "string" } },
++	{
++		name: "set_title_language",
++		doc: "Set the language of future generated titles for this RPC process; null or English uses the default.",
++		params: { language: "string | null" },
++		result: { language: "string | null" },
++	},
+ 	{
+ 		name: "handoff",
+ 		doc: "Hand the conversation off to a fresh session; null when no handoff was produced.",
+diff --git a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
+index 9b6fc39d07..5da42d1210 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
++++ b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.generated.ts
+@@ -1938,6 +1938,14 @@ export interface SetSessionNameParams {
+ 	name: string;
+ }
+ 
++export interface SetTitleLanguageParams {
++	language: string | null;
++}
++
++export interface SetTitleLanguageResult {
++	language: string | null;
++}
++
+ export interface HandoffParams {
+ 	customInstructions?: string;
+ }
+@@ -2084,6 +2092,7 @@ export interface RpcWireCommands {
+ 	get_branch_messages: { params: undefined; result: GetBranchMessagesResult };
+ 	get_last_assistant_text: { params: undefined; result: GetLastAssistantTextResult };
+ 	set_session_name: { params: SetSessionNameParams; result: undefined };
++	set_title_language: { params: SetTitleLanguageParams; result: SetTitleLanguageResult };
+ 	handoff: { params: HandoffParams; result: HandoffResult | null };
+ 	get_messages: { params: undefined; result: GetMessagesResult };
+ 	get_messages_page: { params: GetMessagesPageParams; result: MessagesPage };
+diff --git a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
+index c7fab7cc8e..f8fca36c13 100644
+--- a/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
++++ b/packages/coding-agent/src/modes/rpc/wire/rpc-wire.schema.json
+@@ -726,6 +726,17 @@
+ 				"completion": null,
+ 				"clientOmit": []
+ 			},
++			{
++				"name": "set_title_language",
++				"doc": "Set the language of future generated titles for this RPC process; null or English uses the default.",
++				"params": "SetTitleLanguageParams",
++				"result": "SetTitleLanguageResult",
++				"nullable": false,
++				"unwrap": null,
++				"timeoutMs": null,
++				"completion": null,
++				"clientOmit": []
++			},
+ 			{
+ 				"name": "handoff",
+ 				"doc": "Hand the conversation off to a fresh session; null when no handoff was produced.",
+@@ -7288,6 +7299,42 @@
+ 				"name"
+ 			]
+ 		},
++		"SetTitleLanguageParams": {
++			"type": "object",
++			"properties": {
++				"language": {
++					"anyOf": [
++						{
++							"type": "string"
++						},
++						{
++							"type": "null"
++						}
++					]
++				}
++			},
++			"required": [
++				"language"
++			]
++		},
++		"SetTitleLanguageResult": {
++			"type": "object",
++			"properties": {
++				"language": {
++					"anyOf": [
++						{
++							"type": "string"
++						},
++						{
++							"type": "null"
++						}
++					]
++				}
++			},
++			"required": [
++				"language"
++			]
++		},
+ 		"HandoffParams": {
+ 			"type": "object",
+ 			"properties": {
+diff --git a/packages/coding-agent/src/prompts/system/title-card.md b/packages/coding-agent/src/prompts/system/title-card.md
+index e6e0d75e3b..df5cc5e5c4 100644
+--- a/packages/coding-agent/src/prompts/system/title-card.md
++++ b/packages/coding-agent/src/prompts/system/title-card.md
+@@ -11,6 +11,9 @@ You head coding-agent session titles with a small card. Pick the card for the se
+ - emoji: the most specific emoji picture of this session's subject, one that tells it apart from the user's other sessions in the same project: the concrete object or feature the title names (🌲 for a directory walker, 🔕 for muting notifications); a mascot or symbol whenever the session is about that language, tool or service (🐳 for Docker builds), never just because the project is written in it; 🐛, 🧪 or ⚡ only when the session is about that very thing, never as a stand-in for the kind of work (any fix, test or speedup); never a generic ✨, 🚀, 🔧, ⚙️ or 🧩.
+ {{/if}}
+ - code: 1-6 capital letters or digits, never more, that name the subject at a glance, made from one word or name in the title: the whole word when it has 6 letters or fewer (SEED, SCOPE, FREEZE, Z3, 404), else cut to its first syllable or leading consonants (PROV for provider, FLBK for fallback). Never initials of several words unless the title writes them so (CTA, SDK).
++{{#if language}}
++- The title text is meant to be in {{language}} and is supplied separately. Return only the card in the specified form. Use only uppercase Latin letters (A-Z) and digits for its code; if needed, base it on a translation or transliteration of one word in the title.
++{{/if}}
+ - Never repeat the title, quote, or explain.
+ 
+ {{#if nerdFonts}}
+diff --git a/packages/coding-agent/src/prompts/system/title-fork.md b/packages/coding-agent/src/prompts/system/title-fork.md
+index fbb0328f62..998f5f65ff 100644
+--- a/packages/coding-agent/src/prompts/system/title-fork.md
++++ b/packages/coding-agent/src/prompts/system/title-fork.md
+@@ -19,6 +19,9 @@ Name this session with a 3-6 word title for the user's goal, informed by the use
+ - code: 1-6 capital letters or digits, never more, that name the subject at a glance, made from one word or name in the title: the whole word when it has 6 letters or fewer (SEED, SCOPE, FREEZE, Z3, 404), else cut to its first syllable or leading consonants (PROV for provider, FLBK for fallback). Never initials of several words unless the user writes them so (CTA, SDK), nor a code that passes for an unrelated name.
+ {{/if}}
+ - Title: imperative phrase built from the user's own key words: the feature, component, or error they name.
++{{#if language}}
++- Write the title text in {{language}}. Keep the output form exactly as specified below. If a card is requested, use only uppercase Latin letters (A-Z) and digits for its code; if needed, base it on a translation or transliteration of one word in the title.
++{{/if}}
+ - No task to name (greeting, acknowledgement, gibberish)? Answer `<title/>`.
+ - No quotes, trailing punctuation, or explanation.
+ {{#if nerdFonts}}
+diff --git a/packages/coding-agent/src/prompts/system/title-marker-instruction.md b/packages/coding-agent/src/prompts/system/title-marker-instruction.md
+index 67124c8e63..a8aa9e8b2d 100644
+--- a/packages/coding-agent/src/prompts/system/title-marker-instruction.md
++++ b/packages/coding-agent/src/prompts/system/title-marker-instruction.md
+@@ -1 +1,4 @@
+ Output only the title wrapped in `<title>` and `</title>` tags, with nothing before or after. When the message carries no concrete task yet (a bare greeting, acknowledgement, small talk, or a request too vague to title without context you cannot see, e.g. "help" or "fix this"), output exactly `<title>none</title>`.
++{{#if language}}
++Write the title text in {{language}}. Keep the output form and any requested card format exactly as specified; use only uppercase Latin letters (A-Z) and digits for the card code.
++{{/if}}
+diff --git a/packages/coding-agent/src/prompts/system/title-system.md b/packages/coding-agent/src/prompts/system/title-system.md
+index 1f5b1b5f0a..9b46cc07b3 100644
+--- a/packages/coding-agent/src/prompts/system/title-system.md
++++ b/packages/coding-agent/src/prompts/system/title-system.md
+@@ -4,6 +4,9 @@ Output exactly one line: the title inside `<title>` tags, or `<title/>` when the
+ 
+ Rules:
+ - Name the user's goal as a short imperative phrase built from the user's own key words (the feature, component, or error they name). Avoid vague filler like "logic", "issues", "functionality".
++{{#if language}}
++- Write the title text in {{language}}. Keep the output form exactly as specified above. If a card is requested, keep its icon and code format, using only uppercase Latin letters (A-Z) and digits for the code.
++{{/if}}
+ - `[Image #N, WxH]` marks an image you cannot see. Never mention it or guess what it shows; title the task the surrounding words name.
+ - Answer `<title/>` for greetings, acknowledgements, gibberish, or requests too vague to name without context you cannot see ("help", "fix this", "what's wrong?").
+ - A `<chat>` block summarizes a longer session: its first `<user>` turn is the opening request, followed by recent turns (often the assistant's working notes). Title the goal the session is working on, using the opening request unless later turns clearly moved to a new task; never title the current micro-step, and ignore file names and symbols unless they are the subject.
+diff --git a/packages/coding-agent/src/session/agent-session.ts b/packages/coding-agent/src/session/agent-session.ts
+index b385d8cadf..854d48899e 100644
+--- a/packages/coding-agent/src/session/agent-session.ts
++++ b/packages/coding-agent/src/session/agent-session.ts
+@@ -1286,6 +1286,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	 *  see {@link setPromptDropped}. */
+ 	#promptDropped: ((prompt: DroppedPrompt) => void) | undefined;
+ 	#titleGenerationAbortController = new AbortController();
++	#titleLanguage: string | null = null;
+ 	#toolChoiceQueue = new ToolChoiceQueue();
+ 
+ 	readonly #bash: BashRunner;
+@@ -12370,6 +12371,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 			promptText: prompt.render(titleForkPrompt, {
+ 				card: icons !== "boring",
+ 				nerdFonts: icons === "nf+emoji",
++				language: this.#titleLanguage,
+ 			}),
+ 			// Journaled where the billed message exists, so a fork that ends in a
+ 			// provider error still records its spend before rejecting.
+@@ -12548,6 +12550,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		firstMessage: string,
+ 		customSystemPrompt?: string,
+ 		signal?: AbortSignal,
++		language = this.#titleLanguage,
+ 	): Promise<string | null> {
+ 		const parentSessionId = this.sessionId;
+ 		const sessionGeneration = this.#sessionGeneration;
+@@ -12580,6 +12583,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 					costGate.record(message.usage.cost.total);
+ 					this.#reportTitleUsage(usageOwner, "title", message, prompt);
+ 				},
++				language,
+ 			),
+ 		);
+ 		if (await this.#sessionGenerationChanged(sessionGeneration)) return null;
+@@ -12672,8 +12676,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 	async #cardTitle(title: string, signal?: AbortSignal): Promise<string> {
+ 		const icons = this.#cardIcons();
+ 		if (icons === "boring" || splitCardTitle(title)) return title;
+-		const cardPrompt = prompt.render(titleCardPrompt, { nerdFonts: icons === "nf+emoji" });
+-		const reply = await this.generateTitle(title, cardPrompt, signal);
++		const cardPrompt = prompt.render(titleCardPrompt, {
++			nerdFonts: icons === "nf+emoji",
++			language: this.#titleLanguage,
++		});
++		// The retry supplies only the card; the existing title text is kept verbatim.
++		const reply = await this.generateTitle(title, cardPrompt, signal, null);
+ 		const card = reply ? parseCardReply(reply, icons) : undefined;
+ 		return card ? formatCardTitle(card, title) : title;
+ 	}
+@@ -13068,6 +13076,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
+ 		return setSessionName.call(this.sessionManager, name, source, trigger);
+ 	}
+ 
++	/** Set the title language for subsequent requests, without changing any saved title. */
++	setTitleLanguage(language: string | null): void {
++		this.#titleLanguage = language?.toLowerCase() === "english" ? null : language;
++	}
++
+ 	/** Write pending bash output and every session entry to the session file, as {@link fork} does before copying it. */
+ 	async flushToDisk(): Promise<void> {
+ 		await this.#bash.flushPending();
+diff --git a/packages/coding-agent/src/tiny/text.ts b/packages/coding-agent/src/tiny/text.ts
+index c4acef7a7e..fee9f3e48c 100644
+--- a/packages/coding-agent/src/tiny/text.ts
++++ b/packages/coding-agent/src/tiny/text.ts
+@@ -85,7 +85,7 @@ const FILLER_TITLE_TOKENS = new Set<string>([
+ 	"anyway",
+ ]);
+ 
+-const TITLE_WORD = /[\p{L}\p{N}]+/gu;
++const TITLE_WORD = /[\p{L}\p{N}][\p{L}\p{M}\p{N}]*/gu;
+ const COMMON_TITLE_ACRONYMS = new Set<string>([
+ 	"API",
+ 	"CLI",
+diff --git a/packages/coding-agent/src/utils/title-generator.ts b/packages/coding-agent/src/utils/title-generator.ts
+index a13023863e..91eee6dc0d 100644
+--- a/packages/coding-agent/src/utils/title-generator.ts
++++ b/packages/coding-agent/src/utils/title-generator.ts
+@@ -23,7 +23,7 @@ import { formatModelStringWithRouting } from "../config/model-resolver";
+ import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
+ import type { Settings } from "../config/settings";
+ import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
+-import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
++import titleSystemPromptTemplate from "../prompts/system/title-system.md" with { type: "text" };
+ import { cfgRetryModelFallback } from "../session/settings";
+ import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
+ import { tinyTitleClient } from "../tiny/title-client";
+@@ -33,7 +33,7 @@ import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+ import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+ import { formatTitleUserMessage } from "../tiny/message-preproc";
+ 
+-const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
++const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPromptTemplate);
+ const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
+ 
+ // Plain π, not the nerd-font `icon.omp` glyph: window/tab titles render in the
+@@ -254,6 +254,7 @@ export function unmeteredMessage(model: Model<Api>, text: string): AssistantMess
+  * @param onUsage Optional reporter for every title attempt the provider billed
+  *   and for a local model's title, so the caller can journal the request on
+  *   the session's cost ledger.
++ * @param titleLanguage Optional language for the generated title text; null or English keeps the default.
+  */
+ export async function generateSessionTitle(
+ 	firstMessage: string,
+@@ -266,6 +267,7 @@ export async function generateSessionTitle(
+ 	signal?: AbortSignal,
+ 	credentialSourceSessionId?: string,
+ 	onUsage?: TitleUsageReporter,
++	titleLanguage?: string | null,
+ ): Promise<string | null> {
+ 	// Defer titling for greetings / acknowledgements / empty input. The default
+ 	// tiny title model can't reliably decline trivial input, so this happens
+@@ -284,6 +286,7 @@ export async function generateSessionTitle(
+ 	}
+ 
+ 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
++	const language = titleLanguage && titleLanguage.toLowerCase() !== "english" ? titleLanguage : undefined;
+ 	if (firstModel.api !== "local-inference") {
+ 		return generateTitleOnlineWithModels(
+ 			firstMessage,
+@@ -295,6 +298,7 @@ export async function generateSessionTitle(
+ 			titleSystemPrompt,
+ 			credentialSourceSessionId,
+ 			onUsage,
++			language,
+ 		);
+ 	}
+ 
+@@ -302,17 +306,23 @@ export async function generateSessionTitle(
+ 	// fails (download missing, runtime crash, abort, or no output), leave the
+ 	// session untitled rather than advancing into a paid fallback candidate.
+ 	try {
++		let localSystemPrompt = titleSystemPrompt;
++		if (language) {
++			localSystemPrompt = titleSystemPrompt
++				? [titleSystemPrompt, prompt.render(titleMarkerInstruction, { language })].join("\n\n")
++				: prompt.render(titleSystemPromptTemplate, { language });
++		}
+ 		const started = performance.now();
+ 		let localTitle: string | null;
+ 		if (signal) {
+ 			localTitle = await tinyTitleClient.generate(
+ 				firstModel.id,
+ 				firstMessage,
+-				titleSystemPrompt ? { signal, systemPrompt: titleSystemPrompt } : { signal },
++				localSystemPrompt ? { signal, systemPrompt: localSystemPrompt } : { signal },
+ 			);
+-		} else if (titleSystemPrompt) {
++		} else if (localSystemPrompt) {
+ 			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage, {
+-				systemPrompt: titleSystemPrompt,
++				systemPrompt: localSystemPrompt,
+ 			});
+ 		} else {
+ 			localTitle = await tinyTitleClient.generate(firstModel.id, firstMessage);
+@@ -384,6 +394,7 @@ async function generateTitleOnlineWithModels(
+ 	customSystemPrompt?: string,
+ 	credentialSourceSessionId?: string,
+ 	onUsage?: TitleUsageReporter,
++	language?: string,
+ ): Promise<string | null> {
+ 	const titleSystemPrompt = customSystemPrompt?.trim() || undefined;
+ 	// The model is always asked to wrap the title in `<title>...</title>` and
+@@ -391,7 +402,9 @@ async function generateTitleOnlineWithModels(
+ 	// scheme, but hosts that ignore or reject forced `tool_choice` then echoed
+ 	// the prompt's `{"title": ...}` JSON example verbatim as the session title;
+ 	// markers work uniformly everywhere.
+-	const systemPrompt = titleSystemPrompt ? [titleSystemPrompt, TITLE_MARKER_INSTRUCTION] : [TITLE_SYSTEM_PROMPT];
++	const systemPrompt = titleSystemPrompt
++		? [titleSystemPrompt, language ? prompt.render(titleMarkerInstruction, { language }) : TITLE_MARKER_INSTRUCTION]
++		: [language ? prompt.render(titleSystemPromptTemplate, { language }) : TITLE_SYSTEM_PROMPT];
+ 	const userMessage = formatTitleUserMessage(firstMessage);
+ 
+ 	for (const model of models) {
+diff --git a/packages/coding-agent/test/title-card.test.ts b/packages/coding-agent/test/title-card.test.ts
+index 416438caa4..6a21497b77 100644
+--- a/packages/coding-agent/test/title-card.test.ts
++++ b/packages/coding-agent/test/title-card.test.ts
+@@ -15,6 +15,15 @@ describe("parseCardTitleReply", () => {
+ 		expect(parseCardTitleReply(reply, "boring")).toBe("Fix flaky park tests");
+ 	});
+ 
++	it("preserves localized title text and keeps the card code in Latin uppercase", () => {
++		expect(
++			parseCardTitleReply('<title emoji="🧪" code="TEST">修复不稳定测试</title>', "emoji", "请修复不稳定的测试"),
++		).toBe("🧪 TEST: 修复不稳定测试");
++		expect(
++			parseCardTitleReply('<title emoji="🧪" code="TEST">परीक्षणों की रिपोर्टिंग ठीक करें</title>', "emoji"),
++		).toBe("🧪 TEST: परीक्षणों की रिपोर्टिंग ठीक करें");
++	});
++
+ 	it("falls back to the emoji for a Nerd Fonts name the catalog does not know", () => {
+ 		// A real hallucination from the prompt workshop.
+ 		expect(
+diff --git a/packages/coding-agent/test/title-generator.test.ts b/packages/coding-agent/test/title-generator.test.ts
+index 899dd2680d..25bf1a4242 100644
+--- a/packages/coding-agent/test/title-generator.test.ts
++++ b/packages/coding-agent/test/title-generator.test.ts
+@@ -80,6 +80,30 @@ describe("title generator", () => {
+ 		expect(messages?.map(message => message.role)).toEqual(["user"]);
+ 	});
+ 
++	it("requests a title in the chosen language for non-ASCII input", async () => {
++		const model = getModelOrThrow("claude-sonnet-4-5");
++		const complete = vi.spyOn(ai, "completeSimple").mockResolvedValue({
++			stopReason: "stop",
++			content: [{ type: "text", text: "<title>修复缓存失效</title>" }],
++		} as never);
++		expect(
++			await generateSessionTitle(
++				"请修复缓存失效问题",
++				createRegistry(model),
++				createSettings(model),
++				undefined,
++				undefined,
++				undefined,
++				undefined,
++				undefined,
++				undefined,
++				undefined,
++				"Chinese (Simplified)",
++			),
++		).toBe("修复缓存失效");
++		expect(String(complete.mock.calls[0]?.[1].systemPrompt)).toContain("Write the title text in Chinese (Simplified)");
++	});
++
+ 	it("selects an available local-inference model from the tiny role", async () => {
+ 		const localModel = getBundledModel("local", "lfm2.5-230m");
+ 		if (!localModel) throw new Error("Expected bundled local tiny model");
+diff --git a/sdk/go/omp-rpc/wire.go b/sdk/go/omp-rpc/wire.go
+index ca5aed12ab..4ffff80cf8 100644
+--- a/sdk/go/omp-rpc/wire.go
++++ b/sdk/go/omp-rpc/wire.go
+@@ -7851,6 +7851,25 @@ func (v *GetLastAssistantTextResult) decodeFrom(raw map[string]json.RawMessage)
+ 	return nil
+ }
+ 
++type SetTitleLanguageResult struct {
++	Language *string `json:"language"`
++}
++
++func (v *SetTitleLanguageResult) UnmarshalJSON(data []byte) error {
++	return decodeWith(data, "SetTitleLanguageResult", v.decodeFrom)
++}
++
++func (v *SetTitleLanguageResult) decodeFrom(raw map[string]json.RawMessage) error {
++	var out SetTitleLanguageResult
++	d := fieldDecoder{raw: raw, owner: "SetTitleLanguageResult"}
++	d.nullable("language", &out.Language)
++	if d.err != nil {
++		return d.err
++	}
++	*v = out
++	return nil
++}
++
+ type GetMessagesResult struct {
+ 	Messages []AgentMessage `json:"messages"`
+ }
+@@ -8703,6 +8722,18 @@ func (c Commands) SetSessionName(ctx context.Context, p SetSessionNameCommand) e
+ 	return c.call(ctx, "set_session_name", p, 0, nil)
+ }
+ 
++// SetTitleLanguageCommand holds the parameters of "set_title_language".
++type SetTitleLanguageCommand struct {
++	Language *string `json:"language"`
++}
++
++// SetTitleLanguage sends "set_title_language": Set the language of future generated titles for this RPC process; null or English uses the default.
++func (c Commands) SetTitleLanguage(ctx context.Context, p SetTitleLanguageCommand) (SetTitleLanguageResult, error) {
++	var out SetTitleLanguageResult
++	err := c.call(ctx, "set_title_language", p, 0, &out)
++	return out, err
++}
++
+ // HandoffCommand holds the parameters of "handoff".
+ type HandoffCommand struct {
+ 	CustomInstructions *string `json:"customInstructions,omitempty"`
+diff --git a/sdk/python/omp-rpc/src/omp_rpc/_wire.py b/sdk/python/omp-rpc/src/omp_rpc/_wire.py
+index 307c2fb9c1..4dc1b08d7b 100644
+--- a/sdk/python/omp-rpc/src/omp_rpc/_wire.py
++++ b/sdk/python/omp-rpc/src/omp_rpc/_wire.py
+@@ -1783,6 +1783,11 @@ class GetSessionLeaseResult:
+     unknown: tuple[str, ...]
+ 
+ 
++@dataclass(slots=True, frozen=True, kw_only=True)
++class SetTitleLanguageResult:
++    language: str | None
++
++
+ @dataclass(slots=True, frozen=True, kw_only=True)
+ class LogoutResult:
+     remaining_source: str | None = None
+@@ -3368,6 +3373,13 @@ def parse_get_session_lease_result(value: object, path: str = "GetSessionLeaseRe
+     )
+ 
+ 
++def parse_set_title_language_result(value: object, path: str = "SetTitleLanguageResult") -> SetTitleLanguageResult:
++    payload = expect_object(value, path)
++    return SetTitleLanguageResult(
++        language=required(payload, "language", nullable(decode_str), path),
++    )
++
++
+ def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
+     payload = expect_object(value, path)
+     return LogoutResult(
+@@ -3893,6 +3905,12 @@ class WireClient:
+         params["name"] = name
+         self._command("set_session_name", params)
+ 
++    def set_title_language(self, language: str | None) -> SetTitleLanguageResult:
++        """Set the language of future generated titles for this RPC process; null or English uses the default."""
++        params: dict[str, object] = {}
++        params["language"] = language
++        return parse_set_title_language_result(self._command("set_title_language", params), "set_title_language")
++
+     def handoff(self, custom_instructions: str | None = None) -> HandoffResult | None:
+         """Hand the conversation off to a fresh session; null when no handoff was produced."""
+         params: dict[str, object] = {}
+@@ -4350,6 +4368,7 @@ __all__ = [
+     "SessionTree",
+     "SetEditorTextUiRequest",
+     "SetStatusUiRequest",
++    "SetTitleLanguageResult",
+     "SetTitleUiRequest",
+     "SetWidgetUiRequest",
+     "ShellForkOutcome",
+@@ -4536,6 +4555,7 @@ __all__ = [
+     "parse_session_tree",
+     "parse_set_editor_text_ui_request",
+     "parse_set_status_ui_request",
++    "parse_set_title_language_result",
+     "parse_set_title_ui_request",
+     "parse_set_widget_ui_request",
+     "parse_shell_fork_outcome",
+diff --git a/sdk/rust/omp-rpc/src/wire.rs b/sdk/rust/omp-rpc/src/wire.rs
+index fadf4ce551..e658d557a5 100644
+--- a/sdk/rust/omp-rpc/src/wire.rs
++++ b/sdk/rust/omp-rpc/src/wire.rs
+@@ -5776,6 +5776,18 @@ pub struct SetSessionNameParams {
+ 	pub name: String,
+ }
+ 
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct SetTitleLanguageParams {
++	#[serde(deserialize_with = "Deserialize::deserialize")]
++	pub language: Option<String>,
++}
++
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++pub struct SetTitleLanguageResult {
++	#[serde(deserialize_with = "Deserialize::deserialize")]
++	pub language: Option<String>,
++}
++
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+ pub struct HandoffParams {
+ 	#[serde(rename = "customInstructions", default, skip_serializing_if = "Option::is_none")]
+@@ -7443,6 +7455,23 @@ impl Command for SetSessionNameCommand {
+ 	}
+ }
+ 
++/// Set the language of future generated titles for this RPC process; null or English uses the default.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
++pub struct SetTitleLanguageCommand {
++	#[serde(deserialize_with = "Deserialize::deserialize")]
++	pub language: Option<String>,
++}
++
++impl Command for SetTitleLanguageCommand {
++	const NAME: &'static str = "set_title_language";
++	const TIMEOUT_MS: Option<u64> = None;
++	type Output = SetTitleLanguageResult;
++
++	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
++		serde_json::from_value::<SetTitleLanguageResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
++	}
++}
++
+ /// Hand the conversation off to a fresh session; null when no handoff was produced.
+ #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+ pub struct HandoffCommand {
 -- 
 2.47.3
 
