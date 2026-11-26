@@ -1,0 +1,7 @@
+{
+  "name": "cgscli",
+  "description": "CGS command-line client",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "bin": { "cgs": "scripts/cgs.ts" }
+}

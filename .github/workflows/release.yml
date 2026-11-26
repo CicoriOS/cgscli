@@ -1,0 +1,37 @@
+name: Release cgscli
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+      - name: Build patched npm bundle
+        run: |
+          bun install --frozen-lockfile
+          bun scripts/fetch-omp.ts /tmp/omp-build
+          bun scripts/replay-patches.ts /tmp/omp-build
+          context=$(mktemp -d)
+          cp "$(command -v bun)" "$context/bun"
+          docker build -f docker/Dockerfile.build -t cgscli-build "$context"
+          rm -r "$context"
+          docker/build.sh /tmp/omp-build
+          docker run --rm -v /tmp/omp-build:/src -w /src/packages/coding-agent cgscli-build bun run gen:bundle
+      - name: Pack and upload GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          bun scripts/pack-release.ts "${tag##*-cgs.}" --out-dir "$RUNNER_TEMP/release"
+          tarball="$RUNNER_TEMP/release/cgscli-${tag#v}.tgz"
+          test -f "$tarball"
+          gh release view "$tag" >/dev/null || gh release create "$tag" --verify-tag --generate-notes
+          gh release upload "$tag" "$tarball" "$RUNNER_TEMP/release/latest.json" --clobber
