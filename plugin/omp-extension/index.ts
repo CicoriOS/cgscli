@@ -5,7 +5,7 @@ import { deviceLogin } from "./login.ts";
 import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type LayoutResult, type ModelManifest, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
-import { registerRemoteCommands } from "./remote.ts";
+import { registerConnectCommand } from "./connect.ts";
 import { providerTransport } from "./provider-transport.ts";
 import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
@@ -207,7 +207,11 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
     // A login must not be overwritten by a still-running refresh of the previous account.
     const current = (pendingSync ?? Promise.resolve()).catch(() => {}).then(() => syncAccount({ pi, connect, agentDir }, a));
     pendingSync = current;
-    try { return await current; }
+    try {
+      const ids = await current;
+      void remote.resume().catch((e) => process.stderr.write(`cgs: remote access: ${e instanceof Error ? e.message : e}\n`));
+      return ids;
+    }
     finally { if (pendingSync === current) pendingSync = undefined; }
   }
   function refresh(account: LoggedIn | null) {
@@ -218,7 +222,7 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.
   const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
   pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
-  registerRemoteCommands(pi);
+  const remote = registerConnectCommand(pi, { agentDir });
   registerAgentCommand(pi, { agentDir, fetch: (r) => connect.router.fetch(r) });
   divert((i, init) => connect.fetch(new Request(i, init)));
   // Register cached models and metadata immediately, then refresh them in the background.
@@ -229,6 +233,7 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
     connect.hub.setModels(account.models, account.pricing, account.capabilities);
     await registerChannels(pi, (i, init) => connect.fetch(new Request(i, init)));
     refresh(account);
+    void remote.resume().catch((e) => process.stderr.write(`cgs: remote access: ${e instanceof Error ? e.message : e}\n`));
   }
   const timer = setInterval(() => refresh(readAccount(agentDir)), ACCOUNT_SYNC_INTERVAL_MS);
   timer.unref();

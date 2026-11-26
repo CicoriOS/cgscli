@@ -406,3 +406,4 @@ export { rootsFromHex, seal, keyId, PRODUCTION_ROOT_KEYS, verifyBundle } from ".
 export { makeWsCarrier, wsCarrier, type Carrier, type Target } from "./tunnel.ts";
 export { noiseInitiator, noiseResponder } from "./noise.ts";
 export * from "./poller.ts";
+export { proxyFor } from "./proxy.ts";
