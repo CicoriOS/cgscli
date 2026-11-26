@@ -56,7 +56,8 @@ const S = {
   model: null, level: "high", configured: "auto", streaming: false,
   run: null, // { state, ringEls: [] } the current prompt run
   msgs: {}, // messageId -> { el, body, ringHost }
-  tools: {}, // toolCallId -> { card, call, result }
+  tools: {}, // toolCallId -> { card, call, result, msgId }
+  chainOpen: {}, // chain key -> open
   raw: [], btw: [], btwOpen: false, hasMsgs: false,
 };
 const composerRing = ring();
@@ -156,19 +157,23 @@ function startRun() {
 }
 /** Sets the state of the running prompt: the composer ring and every ring this run has put into the transcript. */
 function setRing(state) {
-  if (S.run) { S.run.state = state; for (const r of S.run.rings) paint(r, state, S.level); }
+  const changed = !S.run || S.run.state !== state || S.run.level !== S.level;
+  if (S.run) { S.run.state = state; S.run.level = S.level; if (changed) for (const r of S.run.rings) paint(r, state, S.level); }
   paint(composerRing, S.run ? state : "idle", S.level);
-  renderTree();
+  if (changed) renderTree(); // rebuilding the sidebar restarts its ring's animation: only when something changed
 }
 function onPromptResult(f) {
-  const end = f.status === "completed" ? "ok" : f.status === "aborted" ? "stop" : "fail";
+  const end = f.status === "error" ? "fail" : "idle"; // a plain reply fades back to grey; green is for tool calls
+  if (S.run) { S.run.level = S.level; }
   if (S.run) { for (const r of S.run.rings) paint(r, end, S.level); S.run.end = end; }
   if (f.status === "error" && f.error?.message) addError(f.error.message);
 }
 function onSettled() {
   S.streaming = false;
   document.body.classList.remove("running");
-  if (S.run) for (const r of S.run.rings) paint(r, S.run.end ?? "stop", S.level);
+  discardPlaceholder();
+  S.pendingUser = undefined;
+  if (S.run) for (const r of S.run.rings) paint(r, S.run.end ?? "idle", S.level);
   S.run = null;
   paint(composerRing, "idle", S.level);
   rpc({ type: "get_state" }).then(applyState).catch(() => {});
@@ -190,7 +195,7 @@ function setHasMsgs(v) {
 }
 function resetChat() {
   transcript.replaceChildren();
-  S.msgs = {}; S.tools = {}; S.run = null;
+  S.msgs = {}; S.tools = {}; S.chainOpen = {}; S.run = null; S.pendingUser = undefined; S.pendingAsst = null;
   S.btw = [];
   setHasMsgs(false);
   setTitle("");
@@ -236,14 +241,22 @@ function argSummary(name, a = {}) {
   return typeof v === "string" ? v.replace(/\s+/g, " ").slice(0, 140) : "";
 }
 
+function toolState(call) {
+  const res = S.tools[call.id]?.result;
+  return res ? (res.isError ? "fail" : "ok") : S.run ? "work" : "idle";
+}
+
 function toolCard(call) {
   const t = S.tools[call.id] ??= { call, result: null, card: h("details", { class: "tool" }) };
   t.call = call;
   const res = t.result;
-  const open = t.card.open;
+  let open = t.card.open;
+  if (res?.isError && !t.opened) { t.opened = true; open = true; } // a failed call opens its card once
+  const r = ring(true);
+  paint(r, toolState(call), S.level);
   t.card.className = `tool${res?.isError ? " err" : ""}`;
   t.card.replaceChildren(
-    h("summary", {}, h("span", { class: "name" }, call.name), h("span", { class: "sum" }, argSummary(call.name, call.arguments))),
+    h("summary", {}, r, h("span", { class: "name" }, call.name), h("span", { class: "sum" }, argSummary(call.name, call.arguments))),
     h("div", { class: "tb" },
       h("div", { class: "lab" }, "arguments"), h("pre", {}, JSON.stringify(call.arguments ?? {}, null, 2)),
       res ? [h("div", { class: "lab" }, res.isError ? "error" : "result"), h("pre", {}, textOf(res.content).slice(0, 20000) || "(empty)")] : h("div", { class: "lab" }, "running…")),
@@ -252,17 +265,44 @@ function toolCard(call) {
   return t.card;
 }
 
+/** A run of consecutive tool calls as one collapsed line; opening it shows the cards. A failure opens it once. */
+function chain(calls, key) {
+  const cards = calls.map(toolCard);
+  const states = calls.map(toolState);
+  const state = states.includes("work") ? "work" : states.includes("fail") ? "fail" : "ok";
+  if (state === "fail" && S.chainOpen[key] === undefined) S.chainOpen[key] = true;
+  const r = ring(true);
+  paint(r, states.every((x) => x === "idle") ? "idle" : state, S.level);
+  const counts = {};
+  for (const c of calls) counts[c.name] = (counts[c.name] ?? 0) + 1;
+  const names = Object.entries(counts).map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(", ");
+  const text = state === "work" ? `Running ${names}…` : state === "fail" ? `${names}: a call failed` : `Used ${names}`;
+  const d = h("details", { class: `chain${state === "fail" ? " err" : ""}`, open: !!S.chainOpen[key] },
+    h("summary", {}, r, h("span", { class: "cs" }, text)), h("div", { class: "cards" }, cards));
+  d.addEventListener("toggle", () => { S.chainOpen[key] = d.open; });
+  return d;
+}
+
 /** Fills an assistant body from a (partial) message; keeps open/closed state of thought blocks across re-renders. */
-function fillAssistant(body, m) {
+function fillAssistant(body, m, key) {
   const opened = [...body.querySelectorAll("details.thought")].map((d) => d.open);
   body.replaceChildren();
-  let ti = 0;
+  let ti = 0, calls = [];
+  const flush = () => { if (calls.length) body.append(chain(calls, `${key}:${body.children.length}`)); calls = []; };
   for (const c of m.content ?? []) {
+    if (c.type === "toolCall") { (S.tools[c.id] ??= { call: c, result: null, card: h("details", { class: "tool" }) }).msgId = key; calls.push(c); continue; }
+    flush();
     if (c.type === "text" && c.text) body.append(h("div", { html: md(c.text) }));
     else if (c.type === "thinking" && c.thinking) body.append(h("details", { class: "thought", open: opened[ti++] }, h("summary", {}, "Thought"), h("div", {}, c.thinking)));
-    else if (c.type === "toolCall") body.append(toolCard(c));
   }
+  flush();
   if (m.stopReason === "error" && m.errorMessage) body.append(h("div", { class: "errline" }, m.errorMessage));
+}
+
+/** Re-renders the message that owns a tool call (its chain summarises the calls' states). */
+function refreshOwner(toolCallId) {
+  const node = S.msgs[S.tools[toolCallId]?.msgId];
+  if (node?.last) fillAssistant(node.body, node.last, S.tools[toolCallId].msgId);
 }
 
 function assistantNode(id, m) {
@@ -277,23 +317,31 @@ function onMessage(f) {
   const m = f.message ?? f.assistantMessageEvent?.partial;
   if (!m) return;
   if (m.role === "user") {
+    if (S.pendingUser !== undefined && textOf(m.content).trim() === S.pendingUser) { S.pendingUser = undefined; return; } // already shown
     if (f.type === "message_start") { appendBlock(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
     return;
   }
   if (m.role === "toolResult") {
     const t = S.tools[m.toolCallId];
-    if (t) { t.result = m; toolCard(t.call); }
+    if (t) { t.result = m; refreshOwner(m.toolCallId); }
     return;
   }
   if (m.role !== "assistant") return;
   let node = S.msgs[f.messageId];
   if (!node) {
-    node = assistantNode(f.messageId, m);
-    if (S.run && !S.run.rings.length) { const r = ring(true); paint(r, S.run.state, S.level); S.run.rings.push(r); node.gutter.append(r); }
-    appendBlock(node.el);
+    if (S.pendingAsst) { // the placeholder (and its ring) becomes this message
+      node = S.pendingAsst;
+      S.pendingAsst = null;
+      delete S.msgs.pending;
+      S.msgs[f.messageId] = node;
+    } else node = assistantNode(f.messageId, m);
+    if (!node.el.isConnected) appendBlock(node.el);
+    if (S.run && !S.run.rings.length) { const r = ring(); paint(r, S.run.state, S.level); S.run.rings.push(r); node.gutter.append(r); }
+    if (!node.el.isConnected) appendBlock(node.el);
   }
   const stick = atBottom();
-  fillAssistant(node.body, m);
+  node.last = m;
+  fillAssistant(node.body, m, f.messageId);
   if (stick) scroller.scrollTop = scroller.scrollHeight;
   const ev = f.assistantMessageEvent?.type ?? "";
   if (S.run && !S.run.end) {
@@ -302,15 +350,14 @@ function onMessage(f) {
   }
 }
 function onToolStart(f) {
-  const t = S.tools[f.toolCallId];
-  if (t) toolCard(t.call);
+  if (S.tools[f.toolCallId]) refreshOwner(f.toolCallId);
   if (S.run && !S.run.end) setRing("work");
 }
 function onToolEnd(f) {
   const t = S.tools[f.toolCallId];
   if (!t) return;
   t.result ??= { content: f.result?.content ?? [], isError: !!f.isError };
-  toolCard(t.call);
+  refreshOwner(f.toolCallId);
 }
 
 /** Renders a saved transcript from get_messages: a ring (final colour) at the first assistant message after each user message. */
@@ -322,13 +369,14 @@ function renderHistory(messages) {
   for (const m of messages) {
     if (m.role === "user") { frag.append(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); first = true; n++; if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
     else if (m.role === "assistant") {
-      const node = assistantNode(`h${n++}`, m);
+      const node = assistantNode(`h${n}`, m); n++;
       for (const c of m.content ?? []) if (c.type === "toolCall") S.tools[c.id] = { call: c, result: results[c.id] ?? null, card: h("details", { class: "tool" }) };
-      fillAssistant(node.body, m);
+      node.last = m;
+      fillAssistant(node.body, m, `h${n}`);
       if (first) {
         first = false;
-        const r = ring(true);
-        paint(r, m.stopReason === "error" ? "fail" : m.stopReason === "aborted" ? "stop" : "ok", S.level);
+        const r = ring();
+        paint(r, m.stopReason === "error" ? "fail" : "idle", S.level);
         node.gutter.append(r);
       }
       frag.append(node.el);
@@ -342,7 +390,7 @@ function renderHistory(messages) {
 async function loadSession() {
   try {
     const data = await rpc({ type: "get_messages" });
-    S.tools = {}; S.msgs = {};
+    S.tools = {}; S.msgs = {}; S.chainOpen = {};
     setTitle("");
     renderHistory(data?.messages ?? data ?? []);
   } catch (e) { toast(String(e.message ?? e)); }
@@ -438,8 +486,47 @@ $("#composer").addEventListener("submit", async (e) => {
   const text = input.value.trim();
   if (!text) return;
   input.value = ""; grow();
-  try { await rpc({ type: "prompt", message: text }); } catch (x) { toast(String(x.message ?? x)); input.value = text; grow(); }
+  const pending = showPending(text);
+  try {
+    const r = await rpc({ type: "prompt", message: text });
+    if (r?.agentInvoked === false) dropPending(pending, false); // handled locally (a slash command): no model turn follows
+  } catch (x) { dropPending(pending, true); toast(String(x.message ?? x)); input.value = text; grow(); }
 });
+
+/** Puts the message and a white (waiting) ring into the transcript at once; omp's own frames take them over when they arrive. */
+function showPending(text) {
+  const user = h("div", { class: "msg user" }, h("div", { class: "bubble" }, text));
+  appendBlock(user);
+  if (!S.title) setTitle(text.slice(0, 60));
+  S.streaming = true;
+  document.body.classList.add("running");
+  S.run = { state: "work", level: S.level, rings: [] };
+  const node = assistantNode("pending", {});
+  const r = ring();
+  paint(r, "work", S.level);
+  S.run.rings.push(r);
+  node.gutter.append(r);
+  appendBlock(node.el);
+  S.pendingUser = text;
+  S.pendingAsst = node;
+  setRing("work");
+  return { user, node };
+}
+function discardPlaceholder() {
+  if (!S.pendingAsst) return;
+  S.pendingAsst.el.remove();
+  delete S.msgs.pending;
+  S.pendingAsst = null;
+}
+function dropPending(p, withUser) {
+  S.pendingUser = undefined;
+  discardPlaceholder();
+  if (withUser) { p.user.remove(); if (!transcript.children.length) setHasMsgs(false); }
+  S.streaming = false;
+  S.run = null;
+  document.body.classList.remove("running");
+  setRing("idle");
+}
 $("#plus").onclick = () => {}; // dummy for now
 
 // ---------------------------------------------------------------- ring popover: thinking effort and model
@@ -489,16 +576,23 @@ function placePopover() {
 /** A stepped slider: Off, then Auto (omp picks the effort per turn), then the efforts the live model offers, low to high. */
 function thinkingSlider(steps) {
   const at = Math.max(0, steps.indexOf(S.configured));
+  const last = Math.max(1, steps.length - 1);
   const name = h("b", {}, steps[at]);
-  const range = h("input", { type: "range", class: "slider", min: 0, max: steps.length - 1, step: 1, value: at, "aria-label": "Thinking effort" });
-  const tint = () => { range.style.accentColor = steps[range.value] === "auto" ? "#8a8a8a" : levelColor(steps[range.value]); };
-  tint();
-  range.addEventListener("input", () => { name.textContent = steps[range.value]; tint(); });
+  const range = h("input", { type: "range", min: 0, max: steps.length - 1, step: 1, value: at, "aria-label": "Thinking effort" });
+  const box = h("div", { class: "sl" }, range);
+  const sync = () => {
+    const step = steps[range.value], c = step === "auto" ? "#8a8a8a" : levelColor(step);
+    box.style.setProperty("--t", String(range.value / last));
+    box.style.setProperty("--c1", c);
+    box.style.setProperty("--c2", `color-mix(in srgb, ${c} 45%, #fff)`);
+    box.classList.toggle("hot", hot(step));
+    name.textContent = step;
+  };
+  sync();
+  range.addEventListener("input", sync);
   range.addEventListener("change", () => pickLevel(steps[range.value]));
-  return h("div", { class: "think" },
-    h("div", { class: "think-now" }, "Effort: ", name),
-    range,
-    h("div", { class: "ticks" }, steps.map((l) => h("span", {}, l === "auto" ? "Auto" : l))));
+  box.append(h("div", { class: "ticks" }, steps.map((l, i) => h("span", { style: `--t:${i / last}` }, l === "auto" ? "Auto" : l))));
+  return h("div", { class: "think" }, h("div", { class: "think-now" }, "Effort: ", name), box);
 }
 async function pickLevel(level) {
   try { await rpc({ type: "set_thinking_level", level }); applyState(await rpc({ type: "get_state" })); } catch (e) { toast(String(e.message ?? e)); }
