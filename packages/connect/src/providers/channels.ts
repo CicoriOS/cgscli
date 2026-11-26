@@ -24,14 +24,19 @@ export function channelForModel(id: string): Channel | null {
   return "cgs-openai";
 }
 
-interface Family { test: RegExp; reasoning: boolean; contextWindow: number; maxTokens: number }
+/**
+ * What a model family can do, as far as the relay's `/v1/models` (ids only) cannot say. omp needs the declaration: a model
+ * registered without `image` makes omp drop attached pictures before the request is built.
+ */
+interface Family { test: RegExp; reasoning: boolean; vision: boolean; contextWindow: number; maxTokens: number }
 const FAMILIES: Family[] = [
-  { test: /^claude/i, reasoning: true, contextWindow: 200000, maxTokens: 32000 },
-  { test: /^gemini/i, reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
-  { test: /^deepseek/i, reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { test: /^(glm|grok|kimi|minimax)/i, reasoning: true, contextWindow: 131072, maxTokens: 8192 },
+  { test: /^claude/i, reasoning: true, vision: true, contextWindow: 200000, maxTokens: 32000 },
+  { test: /^gemini/i, reasoning: true, vision: true, contextWindow: 1048576, maxTokens: 65536 },
+  { test: /^deepseek/i, reasoning: true, vision: true, contextWindow: 1000000, maxTokens: 65536 },
+  { test: /^(glm|grok|kimi|minimax)/i, reasoning: true, vision: false, contextWindow: 131072, maxTokens: 8192 },
+  { test: CODEX_ID, reasoning: false, vision: true, contextWindow: 128000, maxTokens: 16384 },
 ];
-const FALLBACK: Omit<Family, "test"> = { reasoning: false, contextWindow: 128000, maxTokens: 16384 };
+const FALLBACK: Omit<Family, "test"> = { reasoning: false, vision: false, contextWindow: 128000, maxTokens: 16384 };
 
 export interface SitePrice { input: number; output: number; cache_read?: number; cache_write?: number }
 
@@ -50,7 +55,7 @@ export function buildManifest(localBase: string, modelIds: string[], pricing: Re
     const f = FAMILIES.find((x) => x.test.test(id)) ?? FALLBACK;
     const price = manifestPrice(pricing[id]);
     const list = by.get(ch) ?? [];
-    list.push({ id, name: displayName(id), contextWindow: f.contextWindow, maxTokens: f.maxTokens, reasoning: f.reasoning, ...(price ? { price } : {}) });
+    list.push({ id, name: displayName(id), contextWindow: f.contextWindow, maxTokens: f.maxTokens, reasoning: f.reasoning, input: f.vision ? ["text", "image"] : ["text"], ...(price ? { price } : {}) });
     by.set(ch, list);
   }
   return {

@@ -18,7 +18,7 @@ import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // takes precedence over `apiKey` (docs/extensions.md), which is what lets omp rotate between sibling slots.
 
 interface ManifestModel {
-  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean;
+  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ("text" | "image")[];
   price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 interface ManifestProvider { id: string; channel: string; baseUrl: string; models: ManifestModel[] }
@@ -107,7 +107,7 @@ export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<
         id: m.id,
         name: m.name,
         reasoning: m.reasoning ?? false,
-        input: ["text"],
+        input: m.input?.length ? m.input : ["text"],
         contextWindow: m.contextWindow,
         maxTokens: m.maxTokens,
         cost: { input: m.price?.input ?? 0, output: m.price?.output ?? 0, cacheRead: m.price?.cacheRead ?? 0, cacheWrite: m.price?.cacheWrite ?? 0 },

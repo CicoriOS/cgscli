@@ -18,6 +18,16 @@ test("channel routing and manifest: non-chat ids dropped, prices mapped, base UR
   expect(m.providers[0]!.models[0]!.price).toEqual({ input: 21, output: 105, cacheRead: 2, cacheWrite: 0 });
 });
 
+test("models declare picture input by family, and the extension registers it (omp drops pictures for text-only models)", async () => {
+  const m = buildManifest("http://x", ["claude-a", "gemini-3-pro", "gpt-5", "deepseek-v4.1-flash", "glm-5"]);
+  const input = Object.fromEntries(m.providers.flatMap((p) => p.models.map((x) => [x.id, x.input])));
+  expect(input).toEqual({ "claude-a": ["text", "image"], "gemini-3-pro": ["text", "image"], "gpt-5": ["text", "image"], "deepseek-v4.1-flash": ["text", "image"], "glm-5": ["text"] });
+  const hub = createProviderHub({ router: router(), models: ["deepseek-v4.1-flash", "glm-5"] });
+  const reg: Record<string, any> = {};
+  await registerChannels({ registerProvider: (n, c) => void (reg[n] = c), registerCommand: () => {} }, (i, init) => hub.fetch(new Request(i, init)));
+  expect(Object.fromEntries(reg["cgs-openai"].models.map((x: any) => [x.id, x.input]))).toEqual({ "deepseek-v4.1-flash": ["text", "image"], "glm-5": ["text"] });
+});
+
 test("channelOfPath: the channel and the upstream path, null for anything else", () => {
   expect(channelOfPath("/_cgsconnect/c/cgs-codex/v1/responses")).toEqual({ channel: "cgs-codex", rest: "/v1/responses" });
   expect(channelOfPath("/_cgsconnect/c/cgs-claude")).toEqual({ channel: "cgs-claude", rest: "/" });

@@ -10,7 +10,7 @@ export interface Router {
 }
 
 export interface ModelEntry {
-  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean;
+  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ("text" | "image")[];
   price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 export interface ModelManifest { providers: { id: string; channel: string; baseUrl: string; models: ModelEntry[] }[] }
