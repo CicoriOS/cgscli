@@ -106,6 +106,14 @@ export function inheritedArgs(argv: readonly string[]): string[] {
   return out;
 }
 
+/**
+ * The command that starts this same cgs. A compiled binary is started by its executable alone; an install run by bun
+ * (`@cicori/cgs` from npm) needs the runtime plus the entry script, and `bun --mode rpc-ui` alone is not cgs.
+ */
+export function selfCommand(execPath: string = process.execPath, main: string = Bun.main): string[] {
+  return /\$bunfs|~BUN/.test(main) ? [execPath] : [execPath, main];
+}
+
 const here = () => fileURLToPath(new URL("../../packages/connect/src/remote/daemon/module.ts", import.meta.url));
 
 /** The part of omp's daemon client this file uses. */
@@ -300,7 +308,7 @@ export function createConnect(o: ConnectOptions): Connect {
       clientSecret: a.clientSecret,
       deviceName: (o.deviceName ?? os.hostname() ?? "unknown").slice(0, 64),
       agentDir: o.agentDir,
-      command: [o.execPath ?? process.execPath, "--mode", "rpc-ui", ...inheritedArgs(o.argv ?? process.argv)],
+      command: [...(o.execPath !== undefined ? [o.execPath] : selfCommand()), "--mode", "rpc-ui", ...inheritedArgs(o.argv ?? process.argv)],
       env: childEnv,
       ...(proxy ? { proxy } : {}),
     });

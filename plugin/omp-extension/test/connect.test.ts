@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, test } from "bun:test";
-import { createConnect, inheritedArgs, remoteStateFile, type UnitPort, type UnitStatus } from "../connect.ts";
+import { createConnect, inheritedArgs, remoteStateFile, selfCommand, type UnitPort, type UnitStatus } from "../connect.ts";
 import { writeAccount } from "../account.ts";
 
 const dirs: string[] = [];
@@ -165,6 +165,12 @@ test("resume starts the unit only when the device switch was left on", async () 
 
 test("sessions inherit the extension and overlay flags of this process", () => {
   expect(inheritedArgs(["cgs", "--config", "/o.yml", "-e", "/x/index.ts", "--model", "m", "hello"])).toEqual(["--config", "/o.yml", "-e", "/x/index.ts"]);
+});
+
+test("selfCommand launches bun installs with their entry script and compiled binaries directly", () => {
+  expect(selfCommand("/opt/bun/bin/bun", "/opt/cgs/dist/index.js")).toEqual(["/opt/bun/bin/bun", "/opt/cgs/dist/index.js"]);
+  expect(selfCommand("/opt/cgs", "/$bunfs/root/cgs")).toEqual(["/opt/cgs"]);
+  expect(selfCommand("C:\\cgs.exe", "B:\\~BUN\\root\\cgs.exe")).toEqual(["C:\\cgs.exe"]);
 });
 
 test("a leased TUI is listed without standing by until a browser attaches", async () => {
