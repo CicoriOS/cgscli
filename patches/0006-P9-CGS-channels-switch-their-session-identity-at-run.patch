@@ -12,6 +12,10 @@ channel's wire id changes, the Claude message threads and other account-scoped
 records and the Antigravity agent/trajectory/session ids kept in that
 conversation's providerSessionState are cleared. Codex keys its WebSocket
 session and prompt cache on the session id, so it follows by itself.
+
+Reason: the relay picks the upstream account, and the client's only way to move on is to look like a new conversation while the transcript stays; omp has no runtime hook for the session id a request carries.
+Upstream: none yet (CGS-specific provider prefix, not a candidate PR)
+Remove-when: upstream exposes a per-request session-identity hook for extension providers, or the build no longer ships the cgs extension
 ---
  packages/ai/src/cgs-session.ts       | 68 +++++++++++++++++++++++++
  packages/ai/src/stream.ts            |  3 +-

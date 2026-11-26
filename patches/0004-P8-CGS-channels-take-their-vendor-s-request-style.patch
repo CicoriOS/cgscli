@@ -1,0 +1,4 @@
+
+Reason: omp keys vendor request rules on the provider id, so the CGS channels, which speak a vendor's own wire under a cgs-* id, fell back to the generic wire of their api.
+Upstream: none yet (CGS-specific provider prefix, not a candidate PR)
+Remove-when: upstream resolves vendor style from the model's wire instead of the provider id, or the build no longer ships the cgs extension
