@@ -153,20 +153,20 @@ body.running #send { background: #0d0d0d; }
 .think { padding: 2px 14px 12px; }
 .think-now { font-size: 13px; color: var(--muted); margin-bottom: 8px; } .think-now b { color: var(--text); font-weight: 600; }
 /* stepped slider with a flowing fill, like ChatGPT's effort control */
-.sl { --t: 0; --c1: #8a8a8a; --c2: #ccc; position: relative; height: 22px; margin: 0 2px; }
-.sl::before, .sl::after { content: ""; position: absolute; left: 0; top: 9px; height: 4px; border-radius: 2px; }
+.sl { --t: 0; --c1: #8a8a8a; --c2: #ccc; position: relative; height: 24px; margin: 0 2px; }
+.sl::before, .sl::after { content: ""; position: absolute; left: 0; top: 2px; height: 20px; border-radius: 10px; } /* 2px taller than the 18px knob */
 .sl::before { right: 0; background: #e6e6e6; }
-.sl::after { width: calc(var(--t) * (100% - 18px) + 9px); background: linear-gradient(90deg, var(--c1), var(--c2), var(--c1)) 0 0 / 200% 100%; animation: flow 1.8s linear infinite; transition: width .12s; }
+.sl::after { width: calc(var(--t) * (100% - 20px) + 20px); background: linear-gradient(90deg, var(--c1), var(--c2), var(--c1)) 0 0 / 200% 100%; animation: flow 1.8s linear infinite; transition: width .12s; }
 .sl.hot::after { animation-duration: .9s; }
 @keyframes flow { to { background-position: -200% 0; } }
-.sl input { -webkit-appearance: none; appearance: none; position: absolute; inset: 0; width: 100%; margin: 0; background: transparent; cursor: pointer; z-index: 1; }
-.sl input::-webkit-slider-runnable-track { background: transparent; height: 22px; }
-.sl input::-moz-range-track { background: transparent; height: 22px; }
-.sl input::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: 2px; border-radius: 50%; background: #fff; border: 2px solid var(--c1); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.sl input { -webkit-appearance: none; appearance: none; position: absolute; top: 0; bottom: 0; left: 1px; width: calc(100% - 2px); margin: 0; background: transparent; cursor: pointer; z-index: 1; }
+.sl input::-webkit-slider-runnable-track { background: transparent; height: 24px; }
+.sl input::-moz-range-track { background: transparent; height: 24px; }
+.sl input::-webkit-slider-thumb { -webkit-appearance: none; width: 18px; height: 18px; margin-top: 3px; border-radius: 50%; background: #fff; border: 2px solid var(--c1); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
 .sl input::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid var(--c1); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
-.sl { margin-bottom: 24px; }
-.ticks { position: absolute; left: 0; right: 0; top: 25px; height: 16px; }
-.ticks span { position: absolute; left: calc(var(--t) * (100% - 18px) + 9px); transform: translateX(-50%); font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.sl { margin-bottom: 26px; }
+.ticks { position: absolute; left: 0; right: 0; top: 28px; height: 16px; }
+.ticks span { position: absolute; left: calc(var(--t) * (100% - 20px) + 10px); transform: translateX(-50%); font-size: 11.5px; color: var(--faint); white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .sl::after { animation: none; } }
 /* tool chains */
 .chain { margin: 6px 0; }
