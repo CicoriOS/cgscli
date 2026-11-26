@@ -139,6 +139,7 @@ let loggedMissingCapabilities = false;
 /**
  * After login, at startup and periodically: fetch the account's models, prices and capabilities, then re-register the
  * channels from the updated hub manifest. Store the account and follow the server's layout unless the user took over.
+ * Capabilities (input modalities) take effect at the next start or new session, not in a session already running.
  * Throws a message fit to show the user when no model list can be had.
  */
 export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<string[]> {
