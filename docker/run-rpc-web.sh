@@ -13,7 +13,7 @@ HOME_MOUNT=${STATE:+-v $STATE:/home/t}
 exec docker run --rm --network host \
   -v "$CGS_BIN":/usr/local/bin/cgs:ro -v "$ROOT":/cgscli:ro \
   $HOME_MOUNT -e HOME=/home/t \
-  -e PI_CONFIG_DIR=.cgs -e PI_NATIVES_DIR=/home/t/.cgs/natives \
+  -e PI_CONFIG_DIR=.cgs -e PI_NATIVES_DIR=/home/t/.cgs/natives -e PI_RPC_TITLE=1 \
   ${CGS_BASE_URL:+-e CGS_BASE_URL="$CGS_BASE_URL"} ${PORT:+-e PORT="$PORT"} ${HOST:+-e HOST="$HOST"} \
   ${MERMAID_JS:+-v "$MERMAID_JS":/vendor/mermaid.min.js:ro -e MERMAID_JS=/vendor/mermaid.min.js} \
   -w /tmp --entrypoint sh cgscli-build -c '

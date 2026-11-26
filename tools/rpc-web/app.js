@@ -26,17 +26,19 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&l
 const BLUE_FROM = [0x7f, 0xe0, 0xe8], BLUE_TO = [0x1d, 0x4e, 0xd8];
 const LEVEL_T = { off: 0, minimal: 0.2, low: 0.4, medium: 0.7, high: 1 };
 const ORANGE = "#ff8c1a";
+const LEVEL_ZH = { off: "关闭", auto: "自动", minimal: "极低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "最高" };
+const levelName = (l) => LEVEL_ZH[l] ?? l;
 const hot = (level) => level === "xhigh" || level === "max";
 function levelColor(level) {
   if (hot(level)) return ORANGE;
   const t = LEVEL_T[level] ?? 1;
   return `rgb(${BLUE_FROM.map((a, i) => Math.round(a + (BLUE_TO[i] - a) * t)).join(",")})`;
 }
-const RING_NAME = { idle: "Idle", work: "Working", ok: "Done", fail: "Failed", stop: "Stopped" };
+const RING_NAME = { idle: "待命", work: "处理中", ok: "完成", fail: "失败", stop: "已停止" };
 
-function ring(small) { return h("span", { class: small ? "ring sm" : "ring", role: "img", "data-s": "idle", "aria-label": "Idle", title: "Idle" }); }
+function ring(small) { return h("span", { class: small ? "ring sm" : "ring", role: "img", "data-s": "idle", "aria-label": "待命", title: "待命" }); }
 function paint(el, state, level) {
-  const name = state === "think" ? `Thinking (${level})` : RING_NAME[state];
+  const name = state === "think" ? `思考中（${levelName(level)}）` : RING_NAME[state];
   el.dataset.s = state;
   el.setAttribute("aria-label", name);
   el.title = name;
@@ -95,9 +97,9 @@ function sendRaw(text) {
 function rpc(cmd) {
   const id = `${S.page}-${++S.seq}`; // unique per page load: the bridge replays old responses on connect
   const p = Promise.withResolvers();
-  const timer = setTimeout(() => { S.pending.delete(id); p.reject(new Error(`${cmd.type}: no answer in 60s`)); }, 60_000);
+  const timer = setTimeout(() => { S.pending.delete(id); p.reject(new Error(`${cmd.type}：60 秒内没有响应`)); }, 60_000);
   S.pending.set(id, { resolve: (v) => { clearTimeout(timer); p.resolve(v); }, reject: (e) => { clearTimeout(timer); p.reject(e); } });
-  if (!sendRaw(JSON.stringify({ ...cmd, id }))) { S.pending.delete(id); clearTimeout(timer); p.reject(new Error("not connected")); }
+  if (!sendRaw(JSON.stringify({ ...cmd, id }))) { S.pending.delete(id); clearTimeout(timer); p.reject(new Error("未连接")); }
   return p.promise;
 }
 
@@ -124,7 +126,7 @@ function onFrame(text) {
   switch (f.type) {
     case "ready": S.ready.resolve(); break;
     case "bridge_restart": S.ready = Promise.withResolvers(); S.cwd = f.cwd; resetChat(); setRing("idle"); break;
-    case "bridge_exit": toast(`omp exited (${f.exitCode})`); break;
+    case "bridge_exit": toast(`omp 已退出（${f.exitCode}）`); break;
     case "agent_start": S.streaming = true; startRun(); break;
     case "thinking_level_changed": S.level = f.resolved ?? S.level; S.configured = f.configured ?? S.configured; if (S.run?.state === "think") setRing("think"); break;
     case "model_changed": rpc({ type: "get_state" }).then(applyState).catch(() => {}); break;
@@ -151,33 +153,51 @@ function applyState(st) {
 // ---------------------------------------------------------------- ring state machine
 function startRun() {
   // An auto-retry starts another agent run inside the same prompt: keep the rings the earlier attempts put into the transcript.
+  if (S.run) S.run.superseded = true;
   S.run = { state: "work", rings: S.run?.rings ?? [] };
   document.body.classList.add("running");
   setRing("work");
 }
-/** Sets the state of the running prompt: the composer ring and every ring this run has put into the transcript. */
+const THINK_HOLD_MS = 1500;
+let holdRun = null;
+/**
+ * Sets the state of the running prompt: the composer ring and every ring this run has put into the transcript. A fast model thinks for
+ * a fraction of a second, so once the blue thinking ring shows, a following state waits until it has been visible for THINK_HOLD_MS.
+ */
 function setRing(state) {
-  const changed = !S.run || S.run.state !== state || S.run.level !== S.level;
-  if (S.run) { S.run.state = state; S.run.level = S.level; if (changed) for (const r of S.run.rings) paint(r, state, S.level); }
-  paint(composerRing, S.run ? state : "idle", S.level);
+  const run = S.run;
+  if (run && run.state === "think" && state !== "think" && Date.now() < run.holdUntil) {
+    run.want = state;
+    holdRun = run;
+    run.holdTimer ??= setTimeout(() => { run.holdTimer = undefined; holdRun = null; if (!run.superseded) applyRing(run, run.want); }, run.holdUntil - Date.now());
+    return;
+  }
+  if (run) { if (state === "think" && run.state !== "think") run.holdUntil = Date.now() + THINK_HOLD_MS; run.want = state; }
+  applyRing(run, state);
+}
+function applyRing(run, state) {
+  const changed = !run || run.state !== state || run.level !== S.level;
+  if (run) { run.state = state; run.level = S.level; if (changed) for (const r of run.rings) paint(r, state, S.level); }
+  if (run || !holdRun) paint(composerRing, run && run === S.run ? state : "idle", S.level); // a finished run's hold keeps the composer ring too
   if (changed) renderTree(); // rebuilding the sidebar restarts its ring's animation: only when something changed
 }
 function onPromptResult(f) {
   const end = f.status === "error" ? "fail" : "idle"; // a plain reply fades back to grey; green is for tool calls
-  if (S.run) { S.run.level = S.level; }
-  if (S.run) { for (const r of S.run.rings) paint(r, end, S.level); S.run.end = end; }
-  const shown = S.turn?.items.some((it) => it.m?.stopReason === "error" && it.m.errorMessage); // the message already carries it
-  if (f.status === "error" && f.error?.message && !shown) addError(f.error.message);
+  if (S.run) { S.run.level = S.level; S.run.end = end; setRing(end); }
+  if (S.turn && f.status !== "completed") { S.turn.interrupted = true; S.turn.errorText = f.error?.message; } // settled in onSettled: see interruptTurn
+  else if (f.status === "error" && f.error?.message) addError(f.error.message);
+  if (f.sessionSettled) onSettled(); // an aborted prompt reports its settling here and sends no session_settled frame
 }
 function onSettled() {
   S.streaming = false;
   document.body.classList.remove("running");
   discardPlaceholder();
   S.pendingUser = undefined;
-  if (S.run) for (const r of S.run.rings) paint(r, S.run.end ?? "idle", S.level);
-  if (S.turn) { S.turn.settled = true; renderTurn(S.turn); S.turn = null; }
+  if (S.run) setRing(S.run.end ?? "idle");
+  if (S.turn) { S.turn.settled = true; if (S.turn.interrupted) interruptTurn(S.turn); renderTurn(S.turn); S.turn = null; }
+  const held = S.run?.holdTimer; // the composer ring goes grey with the transcript rings, when the hold ends
   S.run = null;
-  paint(composerRing, "idle", S.level);
+  if (!held && !holdRun) paint(composerRing, "idle", S.level);
   rpc({ type: "get_state" }).then(applyState).catch(() => {});
   refreshTree();
 }
@@ -350,8 +370,8 @@ function toolCard(call) {
   t.card.replaceChildren(
     h("summary", {}, r, h("span", { class: "name" }, call.name), h("span", { class: "sum" }, argSummary(call.name, call.arguments))),
     h("div", { class: "tb" },
-      h("div", { class: "lab" }, "arguments"), h("pre", {}, JSON.stringify(call.arguments ?? {}, null, 2)),
-      res ? [h("div", { class: "lab" }, res.isError ? "error" : "result"), h("pre", {}, textOf(res.content).slice(0, 20000) || "(empty)")] : h("div", { class: "lab" }, "running…")),
+      h("div", { class: "lab" }, "参数"), h("pre", {}, JSON.stringify(call.arguments ?? {}, null, 2)),
+      res ? [h("div", { class: "lab" }, res.isError ? "错误" : "结果"), h("pre", {}, textOf(res.content).slice(0, 20000) || "（空）")] : h("div", { class: "lab" }, "运行中…")),
   );
   t.card.open = open;
   return t.card;
@@ -367,8 +387,8 @@ function chain(calls, key) {
   paint(r, states.every((x) => x === "idle") ? "idle" : state, S.level);
   const counts = {};
   for (const c of calls) counts[c.name] = (counts[c.name] ?? 0) + 1;
-  const names = Object.entries(counts).map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join(", ");
-  const text = state === "work" ? `Running ${names}…` : state === "fail" ? `${names}: a call failed` : `Used ${names}`;
+  const names = Object.entries(counts).map(([n, k]) => (k > 1 ? `${n} ×${k}` : n)).join("、");
+  const text = state === "work" ? `正在运行 ${names}…` : state === "fail" ? `${names}：有调用失败` : `使用了 ${names}`;
   const d = h("details", { class: `chain${state === "fail" ? " err" : ""}`, open: !!S.chainOpen[key] },
     h("summary", {}, r, h("span", { class: "cs" }, text)), h("div", { class: "cards" }, cards));
   d.addEventListener("toggle", () => { S.chainOpen[key] = d.open; });
@@ -385,12 +405,44 @@ function fmtDur(ms) {
 }
 
 function thoughtLine(c, key, streaming) {
-  const r = ring(true);
-  paint(r, streaming ? "think" : "idle", S.level);
   const d = h("details", { class: "thought", open: !!S.chainOpen[key] },
-    h("summary", {}, r, h("span", { class: "cs" }, streaming ? "Thinking…" : "Thought")), h("div", { class: "tt" }, c.thinking));
+    h("summary", {}, h("span", { class: "cs" }, streaming ? "思考中…" : "思考")), h("div", { class: "tt" }, c.thinking));
   d.addEventListener("toggle", () => { S.chainOpen[key] = d.open; });
   return d;
+}
+
+const COPY_ICON = '<svg class="i" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>';
+/** The copy button under a reply; shown only while the pointer is near the message (css). */
+function copyBar(text) {
+  const b = h("button", { type: "button", class: "copy-btn", title: "复制", "aria-label": "复制", html: COPY_ICON });
+  b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(text); } catch {
+      const ta = h("textarea", {});
+      ta.value = text; document.body.append(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    }
+    b.innerHTML = ICON.check; b.title = "已复制";
+    setTimeout(() => { b.innerHTML = COPY_ICON; b.title = "复制"; }, 1500);
+  });
+  return h("div", { class: "actions" }, b);
+}
+
+/**
+ * A turn that ended in an error or a stop. Nothing of the model's work yet (no thinking, text or tool call): the message goes back
+ * to the editor and leaves the transcript. Otherwise the work stays and the user message gets an "edit" button that refills the editor.
+ */
+function interruptTurn(turn) {
+  const started = turn.items.some((it) => (it.m?.content ?? []).some((c) => (c.type === "thinking" && c.thinking) || (c.type === "text" && c.text) || c.type === "toolCall"));
+  const user = turn.user;
+  if (started) {
+    if (turn.errorText && !turn.items.some((it) => it.m?.errorMessage)) addError(turn.errorText);
+    if (user) user.el.append(h("button", { type: "button", class: "edit-btn", onclick: () => { input.value = user.text; grow(); input.focus(); } }, "编辑"));
+    return;
+  }
+  user?.el.remove();
+  for (const it of turn.items) it.node.el.remove();
+  if (!transcript.children.length) setHasMsgs(false);
+  if (user && !input.value) { input.value = user.text; grow(); }
+  if (turn.errorText) toast(turn.errorText);
 }
 
 /**
@@ -444,6 +496,7 @@ function renderTurn(turn) {
     const kids = [];
     if (i === 0 && procNode) kids.push(procNode);
     for (const t of texts[i]) kids.push(h("div", { html: md(t) }));
+    if (texts[i].length && (!turn.live || turn.settled || it.m?.stopReason)) kids.push(copyBar(texts[i].join("\n\n")));
     if (it.m?.stopReason === "error" && it.m.errorMessage) kids.push(h("div", { class: "errline" }, it.m.errorMessage));
     it.node.body.replaceChildren(...kids);
     if (i > 0) it.node.el.hidden = !kids.length;
@@ -470,7 +523,13 @@ function onMessage(f) {
   if (!m) return;
   if (m.role === "user") {
     if (S.pendingUser !== undefined && textOf(m.content).trim() === S.pendingUser) { S.pendingUser = undefined; return; } // already shown
-    if (f.type === "message_start") { S.turn = newTurn(Date.now(), true); appendBlock(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
+    if (f.type === "message_start") {
+      const text = textOf(m.content), el = h("div", { class: "msg user" }, h("div", { class: "bubble" }, text));
+      S.turn = newTurn(Date.now(), true);
+      S.turn.user = { el, text };
+      appendBlock(el);
+      if (!S.title) setTitle(text.slice(0, 60));
+    }
     return;
   }
   if (m.role === "toolResult") {
@@ -565,7 +624,7 @@ async function loadSession() {
 // ---------------------------------------------------------------- sidebar
 const rel = (ms) => {
   const s = Math.max(0, (Date.now() - ms) / 1000);
-  return s < 60 ? "now" : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : s < 86400 * 30 ? `${Math.floor(s / 86400)}d` : `${Math.floor(s / 86400 / 30)}mo`;
+  return s < 60 ? "刚刚" : s < 3600 ? `${Math.floor(s / 60)} 分钟` : s < 86400 ? `${Math.floor(s / 3600)} 小时` : s < 86400 * 30 ? `${Math.floor(s / 86400)} 天` : `${Math.floor(s / 86400 / 30)} 个月`;
 };
 const base = (p) => p.replace(/\/+$/, "").split("/").pop() || p;
 
@@ -588,7 +647,7 @@ function renderTree() {
           const live = S.run && s.path === S.sessionFile;
           const mark = live ? (() => { const r = ring(true); paint(r, S.run.state, S.level); return r; })() : h("span", { class: "age" }, rel(s.updatedAt));
           return h("div", { class: `sess${s.path === S.sessionFile ? " active" : ""}`, title: s.title, onclick: () => openSession(w.cwd, s.path) }, h("span", { class: "t" }, s.title), mark);
-        }) : h("div", { class: "ws-empty" }, "No chats yet")));
+        }) : h("div", { class: "ws-empty" }, "暂无对话")));
     return el;
   });
   tree.replaceChildren(...nodes);
@@ -597,7 +656,7 @@ function renderTree() {
 /** Makes the omp child run in `cwd` (restarting it when it runs elsewhere). Returns false when the user declined. */
 async function enter(cwd) {
   if (cwd === S.cwd) return true;
-  if (S.streaming && !confirm("A task is running in another workspace. Switching restarts omp and aborts it. Continue?")) return false;
+  if (S.streaming && !confirm("另一个工作区里有任务正在运行。切换会重启 omp 并中止它，继续吗？")) return false;
   const r = await api("/api/cwd", { cwd });
   S.cwd = r.cwd;
   if (r.restarted) await S.ready.promise;
@@ -610,7 +669,7 @@ async function openSession(cwd, path) {
     S.activeCwd = cwd;
     resetChat();
     const r = await rpc({ type: "switch_session", sessionPath: path });
-    if (r?.cancelled) { toast("Switch was cancelled"); return; }
+    if (r?.cancelled) { toast("切换已取消"); return; }
     applyState(await rpc({ type: "get_state" }));
     await loadSession();
   } catch (e) { toast(String(e.message ?? e)); }
@@ -627,15 +686,64 @@ async function newChat(cwd = S.activeCwd || S.cwd) {
   } catch (e) { toast(String(e.message ?? e)); }
 }
 $("#new-chat").onclick = () => newChat();
-$("#new-ws").onclick = async () => {
-  const cwd = prompt("Absolute path of the new workspace directory:", "/tmp/");
-  if (!cwd) return;
+// Add workspace: a spotlight-style box that suggests directories while a path is typed.
+const wsDialog = $("#ws-dialog"), wsInput = $("#ws-input"), wsList = $("#ws-list"), wsHint = $("#ws-hint");
+const wsState = { entries: [], exists: false, sel: -1, seq: 0 };
+async function wsRefresh() {
+  const mine = ++wsState.seq;
+  let r = { exists: false, entries: [] };
+  try { r = await api(`/api/complete?path=${encodeURIComponent(wsInput.value)}`); } catch { /* keep an empty list */ }
+  if (mine !== wsState.seq) return;
+  wsState.entries = r.entries;
+  wsState.exists = r.exists;
+  wsState.sel = -1;
+  drawWs();
+}
+function drawWs() {
+  wsList.replaceChildren(...wsState.entries.map((p, i) => h("div", { class: `ws-row${i === wsState.sel ? " sel" : ""}`, onclick: () => wsOpen(p) }, h("span", { html: ICON.folder }), h("span", { class: "p" }, p))));
+  wsHint.textContent = !wsInput.value.startsWith("/") ? "请输入以 / 开头的绝对路径"
+    : wsState.sel >= 0 ? "回车：添加所选目录"
+    : wsState.exists ? "回车：在此目录添加工作区　Tab：补全　↑↓：选择"
+    : "回车：创建此目录并添加　Tab：补全　↑↓：选择";
+}
+function wsClose() { wsDialog.hidden = true; }
+async function wsOpen(p) {
+  const cwd = p.trim().replace(/\/+$/, "") || "/";
+  if (!cwd.startsWith("/")) { toast("请输入以 / 开头的绝对路径"); return; }
+  wsClose();
   try {
-    await api("/api/workspace", { cwd: cwd.trim() });
-    S.expanded[cwd.trim()] = true;
-    await newChat(cwd.trim());
+    await api("/api/workspace", { cwd });
+    S.expanded[cwd] = true;
+    await newChat(cwd);
   } catch (e) { toast(String(e.message ?? e)); }
+}
+$("#new-ws").onclick = () => {
+  wsDialog.hidden = false;
+  wsInput.value = "/";
+  wsInput.focus();
+  wsRefresh();
 };
+wsDialog.addEventListener("mousedown", (e) => { if (e.target === wsDialog) wsClose(); });
+wsInput.addEventListener("input", wsRefresh);
+wsInput.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  const n = wsState.entries.length;
+  if (e.key === "Escape") wsClose();
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!n) return;
+    wsState.sel = e.key === "ArrowDown" ? (wsState.sel + 1) % n : (wsState.sel <= 0 ? n - 1 : wsState.sel - 1);
+    drawWs();
+    wsList.children[wsState.sel]?.scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    const target = wsState.entries[Math.max(0, wsState.sel)];
+    if (target) { wsInput.value = `${target}/`; wsRefresh(); }
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    wsOpen(wsState.sel >= 0 ? wsState.entries[wsState.sel] : wsInput.value);
+  }
+});
 $("#toggle-side").onclick = () => document.body.classList.toggle("side-hidden");
 $("#toggle-right").onclick = () => { const r = $("#right"); r.hidden = !r.hidden; };
 
@@ -666,6 +774,7 @@ function showPending(text) {
   document.body.classList.add("running");
   S.run = { state: "work", level: S.level, rings: [] };
   S.turn = newTurn(Date.now(), true);
+  S.turn.user = { el: user, text };
   const node = assistantNode("pending", {});
   const r = ring();
   paint(r, "work", S.level);
@@ -696,39 +805,44 @@ $("#plus").onclick = () => {}; // dummy for now
 
 // ---------------------------------------------------------------- ring popover: thinking effort and model
 const pop = $("#popover");
-let popSeq = 0;
+let popSeq = 0, popQuery = "";
 $("#ring-btn").onclick = (e) => { e.stopPropagation(); if (pop.hidden) openPopover(); else pop.hidden = true; };
 document.addEventListener("click", (e) => { if (!pop.hidden && !pop.contains(e.target)) pop.hidden = true });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") { pop.hidden = true; } });
 
 async function openPopover() {
   pop.hidden = false;
-  pop.replaceChildren(h("div", { class: "muted", style: "padding:10px" }, "Loading…"));
+  pop.replaceChildren(h("div", { class: "muted", style: "padding:10px" }, "加载中…"));
   placePopover();
+  popQuery = "";
+  await refreshPopover();
+}
+/** (Re)draws the card from the live state; picking a model calls it again so the card stays open with the new model's efforts. */
+async function refreshPopover() {
   const mine = ++popSeq;
   try {
-    const [lv, pk] = await Promise.all([rpc({ type: "get_available_thinking_levels" }), rpc({ type: "get_model_picker", limit: 60 })]);
-    if (mine === popSeq) drawPopover(lv.levels ?? [], pk);
+    const [lv, pk] = await Promise.all([rpc({ type: "get_available_thinking_levels" }), rpc({ type: "get_model_picker", query: popQuery || undefined, limit: 60 })]);
+    if (mine === popSeq && !pop.hidden) drawPopover(lv.levels ?? [], pk);
   } catch (e) { pop.hidden = true; toast(String(e.message ?? e)); }
 }
 
 function drawPopover(levels, picker) {
-  const search = h("input", { class: "search", placeholder: "Search models" });
+  const search = h("input", { class: "search", placeholder: "搜索模型", value: popQuery });
   const rows = h("div", {});
   const showRows = (pk) => {
     rows.replaceChildren(...pk.rows.flatMap((r, i) => [
       i === pk.recent && pk.recent > 0 ? h("div", { class: "sep" }) : null,
       h("div", { class: "mrow", onclick: () => pickModel(r) }, h("span", { class: "n" }, r.name || r.id), h("span", { class: "p" }, r.provider), h("span", { class: "ck", html: r.current ? ICON.check : "" })),
     ]).filter(Boolean));
-    if (!pk.rows.length) rows.replaceChildren(h("div", { class: "muted", style: "padding:8px" }, "No models"));
+    if (!pk.rows.length) rows.replaceChildren(h("div", { class: "muted", style: "padding:8px" }, "没有匹配的模型"));
   };
   let t;
-  search.addEventListener("input", () => { clearTimeout(t); t = setTimeout(async () => { try { showRows(await rpc({ type: "get_model_picker", query: search.value, limit: 60 })); } catch (e) { toast(String(e.message ?? e)); } }, 180); });
+  search.addEventListener("input", () => { popQuery = search.value; clearTimeout(t); t = setTimeout(async () => { try { showRows(await rpc({ type: "get_model_picker", query: popQuery, limit: 60 })); } catch (e) { toast(String(e.message ?? e)); } }, 180); });
   showRows(picker);
   pop.replaceChildren(
-    h("h4", {}, "Thinking"),
+    h("h4", {}, "思考强度"),
     thinkingSlider(["off", "auto", ...levels.filter((l) => l !== "off" && l !== "auto")]),
-    h("h4", {}, "Model"), search, rows);
+    h("h4", {}, "模型"), search, rows);
   placePopover();
 }
 /** Anchors the card to the ring button: above it when there is room, else below, clamped to the viewport. */
@@ -742,8 +856,8 @@ function placePopover() {
 function thinkingSlider(steps) {
   const at = Math.max(0, steps.indexOf(S.configured));
   const last = Math.max(1, steps.length - 1);
-  const name = h("b", {}, steps[at]);
-  const range = h("input", { type: "range", min: 0, max: steps.length - 1, step: 1, value: at, "aria-label": "Thinking effort" });
+  const name = h("b", {}, levelName(steps[at]));
+  const range = h("input", { type: "range", min: 0, max: steps.length - 1, step: 1, value: at, "aria-label": "思考强度" });
   const box = h("div", { class: "sl" }, range);
   const sync = () => {
     const step = steps[range.value], c = step === "auto" ? "#8a8a8a" : levelColor(step);
@@ -751,13 +865,13 @@ function thinkingSlider(steps) {
     box.style.setProperty("--c1", c);
     box.style.setProperty("--c2", `color-mix(in srgb, ${c} 45%, #fff)`);
     box.classList.toggle("hot", hot(step));
-    name.textContent = step;
+    name.textContent = levelName(step);
   };
   sync();
   range.addEventListener("input", sync);
   range.addEventListener("change", () => pickLevel(steps[range.value]));
-  box.append(h("div", { class: "ticks" }, steps.map((l, i) => h("span", { style: `--t:${i / last}` }, l === "auto" ? "Auto" : l))));
-  return h("div", { class: "think" }, h("div", { class: "think-now" }, "Effort: ", name), box);
+  box.append(h("div", { class: "ticks" }, steps.map((l, i) => h("span", { style: `--t:${i / last}` }, levelName(l)))));
+  return h("div", { class: "think" }, h("div", { class: "think-now" }, "强度：", name), box);
 }
 async function pickLevel(level) {
   try { await rpc({ type: "set_thinking_level", level }); applyState(await rpc({ type: "get_state" })); } catch (e) { toast(String(e.message ?? e)); }
@@ -766,8 +880,7 @@ async function pickModel(r) {
   try {
     await rpc({ type: "set_model", provider: r.provider, modelId: r.id, ...(r.role ? { role: r.role } : {}) });
     applyState(await rpc({ type: "get_state" }));
-    pop.hidden = true;
-    toast(`Model: ${r.provider}/${r.id}`);
+    await refreshPopover();
   } catch (e) { toast(String(e.message ?? e)); }
 }
 

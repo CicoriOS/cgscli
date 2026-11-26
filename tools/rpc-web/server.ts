@@ -138,11 +138,29 @@ function sessions(): { workspaces: { cwd: string; sessions: SessionRow[] }[] } {
   };
 }
 
+/** Directory suggestions for a path being typed: the directories under its parent that start with its last segment (hidden ones only when asked for). */
+function complete(typed: string): { exists: boolean; entries: string[] } {
+  if (!path.isAbsolute(typed)) return { exists: false, entries: [] };
+  const inDir = typed.endsWith("/");
+  const dir = inDir ? typed : path.dirname(typed);
+  const prefix = inDir ? "" : path.basename(typed).toLowerCase();
+  const isDir = (p: string) => { try { return fs.statSync(p).isDirectory(); } catch { return false; } };
+  let names: string[] = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  const entries = names
+    .filter((n) => n.toLowerCase().startsWith(prefix) && (prefix.startsWith(".") || !n.startsWith(".")) && isDir(path.join(dir, n)))
+    .sort((a, b) => a.localeCompare(b))
+    .slice(0, 40)
+    .map((n) => path.join(dir, n));
+  return { exists: isDir(typed), entries };
+}
+
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
 async function api(req: Request, route: string): Promise<Response> {
   if (route === "/api/info" && req.method === "GET") return json({ cwd, agentDir });
   if (route === "/api/sessions" && req.method === "GET") return json(sessions());
+  if (route === "/api/complete" && req.method === "GET") return json(complete(new URL(req.url).searchParams.get("path") ?? "/"));
   if (req.method !== "POST") return json({ error: "not found" }, 404);
   const body = (await req.json().catch(() => null)) as { cwd?: unknown } | null;
   if (typeof body?.cwd !== "string" || !path.isAbsolute(body.cwd)) return json({ error: "cwd must be an absolute path" }, 400);
