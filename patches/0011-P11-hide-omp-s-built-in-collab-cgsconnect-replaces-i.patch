@@ -1,7 +1,7 @@
-From 152d69647271a1e710e0e1087cb11e70c71d800f Mon Sep 17 00:00:00 2001
+From 54563b8fba1b292d29db4e33ea03d90e04b1ddd5 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Thu, 26 Nov 2026 23:10:38 +0800
-Subject: [PATCH 11/11] P11: hide omp's built-in collab (cgsconnect replaces
+Subject: [PATCH 11/12] P11: hide omp's built-in collab (cgsconnect replaces
  it)
 
 Reason: ADR 0025 uses cgsconnect for live sessions. The upstream command tables are static; remove their live-session entries without disabling session export sharing.

@@ -1,85 +1,101 @@
-From f9c9fea70c79a97b96bbdc6effc192bcbcd9dc9f Mon Sep 17 00:00:00 2001
+From 87a742efa93f6bdbac5e9241cc5e8fabe32204d8 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Thu, 26 Nov 2026 22:53:29 +0800
-Subject: [PATCH 10/11] P16: update from the cgscli GitHub release
+Subject: [PATCH 10/12] P16: update from the cgs package on npm
 
-Reason: A CGS build must update from the cgscli release, never from omp's channels (they would replace it with upstream omp). The source, the installer and the verification are inside update-cli and the startup check, which the extension API cannot reach.
+Reason: A CGS build must update from its own release, never from omp's channels (they would replace it with upstream omp). The source, the installer and the verification are inside update-cli and the startup check, which the extension API cannot reach.
 Upstream: none (distribution-specific update source)
 Remove-when: CGS stops shipping a branded omp build
 
-- cli/cgs-release.ts: reads `latest.json` beside the newest release's assets (CGS_RELEASE_URL replaces the base) and validates it
-- `cgs update` and `--check`: compare with the running version, install the release's `cgscli` tarball with `bun install -g`, verify through the `cgs` launcher
+- cli/cgs-release.ts: reads the `latest` document of the npm package `@cicori/cgs` from the npm registry and npmmirror at once, first answer wins (CGS_REGISTRY_URL replaces the list) and validates it
+- `cgs update` and `--check`: compare with the running version, install the release tarball with `bun install -g --registry=<answering registry>`, verify through the `cgs` launcher
 - startup check and auto-update offer only that release; the notice says `cgs update`
 - replaces the P4 gate that disabled updating unless PI_BUILD_URL was set
 ---
- packages/coding-agent/src/cli/cgs-release.ts  | 50 +++++++++++
+ packages/coding-agent/src/cli/cgs-release.ts  | 66 +++++++++++++++
  packages/coding-agent/src/cli/update-cli.ts   | 84 +++++++++----------
  packages/coding-agent/src/main.ts             | 23 ++---
  .../src/modes/interactive/update-notice.tsx   |  2 +-
  .../coding-agent/test/cgs-release.test.ts     | 54 ++++++++++++
  packages/coding-agent/test/update-cli.test.ts | 16 ++--
- 6 files changed, 160 insertions(+), 69 deletions(-)
+ 6 files changed, 176 insertions(+), 69 deletions(-)
  create mode 100644 packages/coding-agent/src/cli/cgs-release.ts
  create mode 100644 packages/coding-agent/test/cgs-release.test.ts
 
 diff --git a/packages/coding-agent/src/cli/cgs-release.ts b/packages/coding-agent/src/cli/cgs-release.ts
 new file mode 100644
-index 0000000000..030820abc2
+index 0000000000..e51d777e5f
 --- /dev/null
 +++ b/packages/coding-agent/src/cli/cgs-release.ts
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,66 @@
 +/**
 + * CGS release source: where `cgs update` and the startup update check look for a newer build.
 + *
-+ * A release of cgscli is a GitHub release whose assets are npm tarballs plus a `latest.json` describing the newest one:
-+ * `{ "version": "19.2.1-cgs.3", "tarball": "https://github.com/<owner>/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz" }`.
-+ * `latest.json` is read from `<release url>/latest.json`; `releases/latest/download/` redirects to the newest release, so no
-+ * API (and no API rate limit) is involved. Omp's own channels (npm, the build service) are never asked: they would replace
-+ * this build with upstream omp. `CGS_RELEASE_URL` replaces the base (a mirror, or a local server in tests).
++ * A release of cgscli is a version of the npm package `@cicori/cgs`. The `latest` document of the package names the
++ * newest version and the tarball `bun install -g` installs. Two registries are asked at once and the first answer wins:
++ * the npm registry, and npmmirror (reachable from mainland China, a few minutes behind). Omp's own channels (its npm
++ * package, the build service) are never asked: they would replace this build with upstream omp.
++ * `CGS_REGISTRY_URL` replaces the registry list with one registry (a private mirror, or a local server in tests).
 + */
 +import { $env, VERSION } from "@oh-my-pi/pi-utils";
 +
-+/** Where the newest release's assets live when `CGS_RELEASE_URL` is unset. */
-+export const CGS_RELEASE_URL = "https://github.com/CicoriOS/cgscli/releases/latest/download";
++/** The package a release is published as. */
++export const CGS_PACKAGE = "@cicori/cgs";
++
++/** Registries asked when `CGS_REGISTRY_URL` is unset. */
++export const CGS_REGISTRIES = ["https://registry.npmjs.org", "https://registry.npmmirror.com"];
 +
 +export interface CgsRelease {
 +	/** `<omp version>-cgs.<n>`. */
 +	version: string;
-+	/** The `cgscli` package tarball `bun install -g` installs. */
++	/** The package tarball `bun install -g` installs. */
 +	tarball: string;
++	/** The registry that answered; the install resolves the tarball's dependencies there too. */
++	registry: string;
 +}
 +
 +const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 +const LOOPBACK_HOSTS: Record<string, true> = { localhost: true, "127.0.0.1": true, "[::1]": true };
 +
-+/** The release description `latest.json` holds. Throws on anything else: a wrong answer must never reach the installer. */
-+export function parseCgsRelease(data: unknown): CgsRelease {
-+	if (typeof data !== "object" || data === null || !("version" in data) || !("tarball" in data)) {
-+		throw new Error("latest.json must hold a version and a tarball");
++/** The `latest` document of the package. Throws on anything else: a wrong answer must never reach the installer. */
++export function parseCgsRelease(data: unknown, registry: string): CgsRelease {
++	if (typeof data !== "object" || data === null || !("version" in data) || !("dist" in data)) {
++		throw new Error("The registry answer must hold a version and a dist");
 +	}
-+	const { version, tarball } = data;
-+	if (typeof version !== "string" || !VERSION_RE.test(version)) throw new Error("latest.json has an invalid version");
-+	if (typeof tarball !== "string") throw new Error("latest.json has an invalid tarball");
++	const { version, dist } = data;
++	if (typeof version !== "string" || !VERSION_RE.test(version)) throw new Error("The registry answer has an invalid version");
++	if (typeof dist !== "object" || dist === null || !("tarball" in dist) || typeof dist.tarball !== "string") {
++		throw new Error("The registry answer has an invalid tarball");
++	}
++	const tarball = dist.tarball;
 +	const url = new URL(tarball);
 +	// Plain http only for a local test server: the tarball is code that is about to be installed.
 +	if (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS[url.hostname])) {
-+		throw new Error(`latest.json names a tarball that is not https: ${tarball}`);
++		throw new Error(`The registry names a tarball that is not https: ${tarball}`);
 +	}
-+	return { version, tarball };
++	return { version, tarball, registry };
 +}
 +
-+/** The newest CGS release. */
++/** The newest CGS release: the first registry to answer. */
 +export async function fetchCgsRelease(timeoutMs = 30_000): Promise<CgsRelease> {
-+	const base = ($env.CGS_RELEASE_URL ?? "").trim().replace(/\/+$/, "") || CGS_RELEASE_URL;
-+	const response = await fetch(`${base}/latest.json`, {
-+		signal: AbortSignal.timeout(timeoutMs),
-+		headers: { "user-agent": `cgs/${VERSION}` },
++	const override = ($env.CGS_REGISTRY_URL ?? "").trim().replace(/\/+$/, "");
++	const registries = override ? [override] : CGS_REGISTRIES;
++	const asks = registries.map(async registry => {
++		const response = await fetch(`${registry}/${CGS_PACKAGE.replace("/", "%2f")}/latest`, {
++			signal: AbortSignal.timeout(timeoutMs),
++			headers: { "user-agent": `cgs/${VERSION}`, accept: "application/json" },
++		});
++		if (!response.ok) throw new Error(`${registry} answered HTTP ${response.status}`);
++		return parseCgsRelease(await response.json(), registry);
 +	});
-+	if (!response.ok) throw new Error(`${base}/latest.json answered HTTP ${response.status}`);
-+	return parseCgsRelease(await response.json());
++	try {
++		return await Promise.any(asks);
++	} catch (err) {
++		throw new Error((err as AggregateError).errors.map((e: unknown) => (e instanceof Error ? e.message : String(e))).join("; "));
++	}
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 9a2f5c55c1..5c403905cc 100644
+index 9a2f5c55c1..ea707945ba 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -42,6 +42,7 @@ import {
@@ -112,8 +128,8 @@ index 9a2f5c55c1..5c403905cc 100644
 - *
 - * Progress and results print to stdout. Throws when the check or the install
 - * fails, or when another update holds the install lock.
-+ * Update from the newest cgscli release (see {@link fetchCgsRelease}): the release's `cgscli` tarball is installed with
-+ * `bun install -g`, which replaces the global package and every tarball it depends on.
++ * Update from the newest cgs release (see {@link fetchCgsRelease}): its package tarball is installed with `bun install -g`
++ * against the registry that answered, which replaces the global package and resolves the dependencies it pins.
   */
 -export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
 -	if (!$env.PI_BUILD_URL?.trim()) {
@@ -169,7 +185,7 @@ index 9a2f5c55c1..5c403905cc 100644
 -		if (!target && isCompiledBinary()) return await runBinaryUpdate(undefined, targetError, request);
 -		return await runManagedUpdate(target, targetError, request);
 +		request.onProgress?.({ phase: "installing", version: release.version });
-+		const exitCode = await runInstaller(["bun", "install", "-g", release.tarball]);
++		const exitCode = await runInstaller(["bun", "install", "-g", `--registry=${release.registry}`, release.tarball]);
 +		if (exitCode !== 0) throw new Error(`bun install failed with exit code ${exitCode}`);
 +		await finishVerifiedUpdate(await verifyInstalledVersion(release.version), release.version);
 +	} catch (err) {
@@ -193,7 +209,7 @@ index 9a2f5c55c1..5c403905cc 100644
 + * fails, or when another update holds the install lock.
 + */
 +export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
-+	// CGS build: the only source is the cgscli GitHub release (P16); omp's own channels are never asked.
++	// CGS build: the only source is the cgs package on npm (P16); omp's own channels are never asked.
 +	return await runCgsUpdate(opts);
  }
  
@@ -270,42 +286,42 @@ index b606fa44e6..92349efda7 100644
  	const prefix = `New version ${props.version} is available. Run: `;
 diff --git a/packages/coding-agent/test/cgs-release.test.ts b/packages/coding-agent/test/cgs-release.test.ts
 new file mode 100644
-index 0000000000..b3c808fa5e
+index 0000000000..592f667f47
 --- /dev/null
 +++ b/packages/coding-agent/test/cgs-release.test.ts
 @@ -0,0 +1,54 @@
 +import { afterEach, describe, expect, test } from "bun:test";
 +import { fetchCgsRelease, parseCgsRelease } from "../src/cli/cgs-release";
 +
++const REGISTRY = "https://registry.npmjs.org";
++
 +describe("parseCgsRelease", () => {
 +	test("accepts a version with the cgs suffix and an https tarball", () => {
-+		expect(parseCgsRelease({ version: "19.2.1-cgs.3", tarball: "https://github.com/x/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz" })).toEqual({
-+			version: "19.2.1-cgs.3",
-+			tarball: "https://github.com/x/cgscli/releases/download/v19.2.1-cgs.3/cgscli-19.2.1-cgs.3.tgz",
-+		});
++		const tarball = "https://registry.npmjs.org/@cicori/cgs/-/cgs-19.2.1-cgs.3.tgz";
++		expect(parseCgsRelease({ version: "19.2.1-cgs.3", dist: { tarball } }, REGISTRY)).toEqual({ version: "19.2.1-cgs.3", tarball, registry: REGISTRY });
 +	});
 +
 +	test("allows plain http only for a loopback server", () => {
-+		expect(parseCgsRelease({ version: "1.0.0", tarball: "http://127.0.0.1:8123/cgscli.tgz" }).tarball).toBe("http://127.0.0.1:8123/cgscli.tgz");
-+		expect(() => parseCgsRelease({ version: "1.0.0", tarball: "http://example.com/cgscli.tgz" })).toThrow("not https");
++		expect(parseCgsRelease({ version: "1.0.0", dist: { tarball: "http://127.0.0.1:8123/cgs.tgz" } }, REGISTRY).tarball).toBe("http://127.0.0.1:8123/cgs.tgz");
++		expect(() => parseCgsRelease({ version: "1.0.0", dist: { tarball: "http://example.com/cgs.tgz" } }, REGISTRY)).toThrow("not https");
 +	});
 +
 +	test("refuses anything that is not a version and a tarball", () => {
-+		expect(() => parseCgsRelease(null)).toThrow();
-+		expect(() => parseCgsRelease({ version: "1.0.0" })).toThrow();
-+		expect(() => parseCgsRelease({ version: "latest", tarball: "https://x/y.tgz" })).toThrow("invalid version");
-+		expect(() => parseCgsRelease({ version: "1.0.0", tarball: 5 })).toThrow("invalid tarball");
++		expect(() => parseCgsRelease(null, REGISTRY)).toThrow();
++		expect(() => parseCgsRelease({ version: "1.0.0" }, REGISTRY)).toThrow();
++		expect(() => parseCgsRelease({ version: "latest", dist: { tarball: "https://x/y.tgz" } }, REGISTRY)).toThrow("invalid version");
++		expect(() => parseCgsRelease({ version: "1.0.0", dist: { tarball: 5 } }, REGISTRY)).toThrow("invalid tarball");
 +	});
 +});
 +
 +describe("fetchCgsRelease", () => {
-+	const saved = process.env.CGS_RELEASE_URL;
++	const saved = process.env.CGS_REGISTRY_URL;
 +	afterEach(() => {
-+		if (saved === undefined) delete process.env.CGS_RELEASE_URL;
-+		else process.env.CGS_RELEASE_URL = saved;
++		if (saved === undefined) delete process.env.CGS_REGISTRY_URL;
++		else process.env.CGS_REGISTRY_URL = saved;
 +	});
 +
-+	test("reads latest.json from CGS_RELEASE_URL and sends no omp channel request", async () => {
++	test("reads the package's latest document from CGS_REGISTRY_URL and sends no omp channel request", async () => {
 +		const seen: string[] = [];
 +		let origin = "";
 +		using server = Bun.serve({
@@ -313,18 +329,18 @@ index 0000000000..b3c808fa5e
 +			hostname: "127.0.0.1",
 +			fetch(req) {
 +				seen.push(new URL(req.url).pathname);
-+				return Response.json({ version: "19.2.1-cgs.2", tarball: `${origin}/cgscli-19.2.1-cgs.2.tgz` });
++				return Response.json({ version: "19.2.1-cgs.2", dist: { tarball: `${origin}/cgs-19.2.1-cgs.2.tgz` } });
 +			},
 +		});
 +		origin = `http://127.0.0.1:${server.port}`;
-+		process.env.CGS_RELEASE_URL = `${origin}/releases/`;
-+		expect((await fetchCgsRelease()).version).toBe("19.2.1-cgs.2");
-+		expect(seen).toEqual(["/releases/latest.json"]);
++		process.env.CGS_REGISTRY_URL = `${origin}/`;
++		expect(await fetchCgsRelease()).toEqual({ version: "19.2.1-cgs.2", tarball: `${origin}/cgs-19.2.1-cgs.2.tgz`, registry: origin });
++		expect(seen).toEqual(["/@cicori%2fcgs/latest"]);
 +	});
 +
-+	test("a missing release is an error naming the status", async () => {
++	test("a missing package is an error naming the status", async () => {
 +		using server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("nope", { status: 404 }) });
-+		process.env.CGS_RELEASE_URL = `http://127.0.0.1:${server.port}`;
++		process.env.CGS_REGISTRY_URL = `http://127.0.0.1:${server.port}`;
 +		await expect(fetchCgsRelease()).rejects.toThrow("HTTP 404");
 +	});
 +});

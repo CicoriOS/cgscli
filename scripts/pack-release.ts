@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
-// Usage: bun scripts/pack-release.ts [n] [--omp-dir DIR] [--out-dir DIR] [--base-url URL]
-// Run after omp's gen:bundle. --base-url is the directory serving the tarball.
+// Usage: bun scripts/pack-release.ts [n] [--omp-dir DIR] [--out-dir DIR]
+// Run after omp's gen:bundle. Writes cicori-cgs-<omp version>-cgs.<n>.tgz, the tarball published to npm as @cicori/cgs.
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isBuiltin } from "node:module";
 import os from "node:os";
@@ -106,7 +106,7 @@ async function stageExtension(stage: string) {
 async function main() {
   const { positionals, values } = parseArgs({
     allowPositionals: true,
-    options: { "omp-dir": { type: "string" }, "out-dir": { type: "string" }, "base-url": { type: "string" } },
+    options: { "omp-dir": { type: "string" }, "out-dir": { type: "string" } },
   });
   const n = positionals[0] ?? process.env.CGS_RELEASE_N ?? "1";
   if (positionals.length > 1 || !/^[1-9]\d*$/.test(n)) throw new Error("Expected one positive integer release number (or CGS_RELEASE_N)");
@@ -117,11 +117,7 @@ async function main() {
   const ompRoot = await Bun.file(path.join(omp, "package.json")).json();
   const lock = Bun.JSONC.parse(await readFile(path.join(omp, "bun.lock"), "utf8")) as { packages: Record<string, LockEntry> };
   const version = `${manifest.version}-cgs.${n}`;
-  const filename = `cgscli-${version}.tgz`;
-  const base = new URL(values["base-url"] ?? `https://github.com/CicoriOS/cgscli/releases/download/v${version}`);
-  if (!/^https?:$/.test(base.protocol) || base.search || base.hash) throw new Error("--base-url must be an HTTP(S) directory URL");
-  base.pathname = `${base.pathname.replace(/\/+$/, "")}/`;
-  const tarball = new URL(filename, base).href;
+  const filename = `cicori-cgs-${version}.tgz`;
   const bundle = await readFile(path.join(agent, "dist/cli.js"), "utf8");
   const dependencies = bundleDependencies(bundle, manifest, ompRoot.workspaces.catalog, lock.packages);
   const cli = setBundleVersion(bundle, manifest.version, version);
@@ -155,10 +151,8 @@ async function main() {
       cwd: stage, stdout: "inherit", stderr: "inherit",
     });
     if (await pack.exited !== 0) throw new Error("bun pm pack failed");
-    await writeFile(path.join(outputStage, "latest.json"), JSON.stringify({ version, tarball }, null, 2) + "\n");
     await rename(path.join(outputStage, filename), path.join(out, filename));
-    await rename(path.join(outputStage, "latest.json"), path.join(out, "latest.json"));
-    console.log(`${path.join(out, filename)} (${(await stat(path.join(out, filename))).size} bytes)\n${path.join(out, "latest.json")}`);
+    console.log(`${path.join(out, filename)} (${(await stat(path.join(out, filename))).size} bytes)`);
   } finally {
     await Promise.all([rm(stage, { recursive: true, force: true }), rm(outputStage, { recursive: true, force: true })]);
   }

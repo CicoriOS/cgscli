@@ -1,10 +1,11 @@
-name: Release cgscli
+name: Release cgs
 on:
   push:
     tags: ['v*']
 
 permissions:
   contents: write
+  id-token: write   # npm trusted publishing (OIDC); no npm token is stored
 
 jobs:
   release:
@@ -14,6 +15,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.4'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
       - name: Build patched npm bundle
         run: |
           bun install --frozen-lockfile
@@ -25,13 +30,20 @@ jobs:
           rm -r "$context"
           docker/build.sh /tmp/omp-build
           docker run --rm -v /tmp/omp-build:/src -w /src/packages/coding-agent cgscli-build bun run gen:bundle
-      - name: Pack and upload GitHub release assets
+      - name: Pack
+        run: |
+          tag="$GITHUB_REF_NAME"
+          bun scripts/pack-release.ts "${tag##*-cgs.}" --out-dir "$RUNNER_TEMP/release"
+          test -f "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz"
+      - name: Publish to npm
+        # Trusted publishing needs npm >= 11.5.1. The version is in the tarball; a tag that disagrees fails here.
+        run: |
+          npm install -g npm@latest
+          npm publish "$RUNNER_TEMP/release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz" --access public --provenance --tag latest
+      - name: Attach the tarball to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
-          bun scripts/pack-release.ts "${tag##*-cgs.}" --out-dir "$RUNNER_TEMP/release"
-          tarball="$RUNNER_TEMP/release/cgscli-${tag#v}.tgz"
-          test -f "$tarball"
           gh release view "$tag" >/dev/null || gh release create "$tag" --verify-tag --generate-notes
-          gh release upload "$tag" "$tarball" "$RUNNER_TEMP/release/latest.json" --clobber
+          gh release upload "$tag" "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz" --clobber

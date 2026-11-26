@@ -1,8 +1,8 @@
-From c267bb00061bf5abaa3e1ac264ae46cfca441115 Mon Sep 17 00:00:00 2001
+From b9604fc212ba9c7c485fe5c322fd10fb28f3d584 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Fri, 27 Nov 2026 00:13:34 +0800
-Subject: [PATCH] P13: attach a remote to a live TUI session; the terminal
- stands by and takes over on Esc
+Subject: [PATCH 12/12] P13: attach a remote to a live TUI session; the
+ terminal stands by and takes over on Esc
 
 Reason: A remote must see and drive a terminal session with the same frames a headless rpc-ui process speaks. The RPC dispatcher is wired to stdio and the process lifetime, and the TUI has no notion of an outside controller. The extension API reaches neither, so the dispatcher is factored (attachRpcMode), a `tui_attach` extension event hands the channel to the extension that serves it (cgsconnect), and the terminal gates its own keys and commands while a remote controls the session (ADR 0027).
 Upstream: none (CGS remote access)

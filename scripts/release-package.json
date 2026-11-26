@@ -1,7 +1,9 @@
 {
-  "name": "cgscli",
+  "name": "@cicori/cgs",
   "description": "CGS command-line client",
   "type": "module",
   "license": "AGPL-3.0-only",
+  "repository": { "type": "git", "url": "git+https://github.com/CicoriOS/cgscli.git" },
+  "publishConfig": { "access": "public" },
   "bin": { "cgs": "scripts/cgs.ts" }
 }
