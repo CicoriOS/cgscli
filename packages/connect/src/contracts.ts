@@ -40,11 +40,4 @@ export interface RemoteLink {
   accept(cb: (d: Duplex) => void): void;
 }
 
-export interface DoctorReport { ok: boolean; items: { name: string; status: "ok" | "missing" | "mismatch" | "unsupported"; detail?: string }[] }
-export interface ComponentManager {
-  doctor(): Promise<DoctorReport>;
-  resolve(name: string): Promise<string | null>;
-  envPath(): string[];
-}
-
 

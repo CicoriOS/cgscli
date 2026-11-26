@@ -1,9 +1,8 @@
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, applyCurrencyEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
 import { deviceLogin } from "./login.ts";
-import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createComponentManager, createConnect, currentPlatform, parseComponentsLock, resolveAgentDir, type ComponentManagerImpl, type ProviderHubImpl } from "@cgscli/connect";
+import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
@@ -30,36 +29,6 @@ interface ExtensionApi {
   registerProvider(name: string, config: Record<string, unknown>): void;
   unregisterProvider?(name: string): void;
   registerCommand(name: string, options: { description?: string; handler(args: string, ctx: CommandContext): Promise<void> }): void;
-}
-
-function lockPath(): string { return process.env.CGS_COMPONENTS_LOCK ?? path.resolve(import.meta.dir, "../../components.lock"); }
-
-function componentManager(): ComponentManagerImpl {
-  const home = process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs");
-  return createComponentManager({ lock: parseComponentsLock(fs.readFileSync(lockPath(), "utf8")), root: path.join(home, "components"), platform: currentPlatform() });
-}
-
-/** `/cgs-doctor` and `/cgs-update`: component checks and installs (components.md) as slash commands, not a separate CLI. */
-export function registerComponentCommands(pi: ExtensionApi): void {
-  pi.registerCommand("cgs-doctor", {
-    description: "Check bundled components (Chromium, toolchain, Git) and their runtime dependencies",
-    handler: async (_a, ctx) => {
-      const r = await componentManager().doctor();
-      ctx.ui.notify(r.items.length ? r.items.map((i) => `${i.status.padEnd(8)} ${i.name}${i.detail ? `  ${i.detail}` : ""}`).join("\n") : "components.lock has no entries for this platform", r.ok ? "info" : "warning");
-    },
-  });
-  pi.registerCommand("cgs-update", {
-    description: "Install the components pinned in components.lock",
-    handler: async (_a, ctx) => {
-      const m = componentManager();
-      const platform = currentPlatform();
-      for (const e of parseComponentsLock(fs.readFileSync(lockPath(), "utf8")).components.filter((c) => c.platform === platform)) {
-        ctx.ui.notify(`Installing ${e.id} ${e.version}…`, "info");
-        await m.install(e.id);
-      }
-      ctx.ui.notify("Components up to date", "info");
-    },
-  });
 }
 
 const API: Record<string, string> = {
@@ -205,7 +174,6 @@ export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.
   const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
   pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
-  registerComponentCommands(pi);
   registerRemoteCommands(pi);
   divert((i, init) => connect.fetch(new Request(i, init)));
   // A stored account: the channels exist from the last known list at once, then the list and prices are refreshed in the background.

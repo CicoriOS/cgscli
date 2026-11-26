@@ -5,18 +5,18 @@
 | Path | What |
 |---|---|
 | `packages/wire` | Message contract (`Duplex`, hello/welcome, message families), TSP APC framing, replay buffer |
-| `packages/connect` | cgsconnect: profile/isolation, pty + TSP host, sessions, protocol server, `router/` (API direct-first + relay tunnel), `providers/` (channels, manifest, session identity epoch, local proxy), `remote/` (E2E relay link), `components/` (components.lock, downloader, doctor) |
-| `plugin/omp-extension` | Pre-installed omp extension: CGS login provider (`/login`), subscription channels from cgsconnect's manifest, `/cgs-doctor` and `/cgs-update` |
+| `packages/connect` | cgsconnect: profile/isolation, pty + TSP host, sessions, protocol server, `router/` (API direct-first + relay tunnel), `providers/` (channels, manifest, session identity epoch, local proxy), `remote/` (E2E relay link) |
+| `plugin/omp-extension` | Pre-installed omp extension: CGS login provider (`/login`), subscription channels from cgsconnect's manifest |
 | `patches/` | Patch series for omp (MIT, see `patches/LICENSE`): `0001` P4 branding (CGS logo and wordmark, `CHANGELOG.cgs.md`, update gate); `0002` P6 lists the `cgs` login first; `0003` P7 yuan prices for `cgs-*` models, no omp-side cost for them (the relay bills), the `cny` usage unit, and "Cicori Good Service" as the provider name; `0004` P8 `cgs-*` channels take their vendor's request style (ADR 0021); `0005` P10 lets the extension guide unknown-tool errors using the request's wire declarations (ADR 0023); `0006` P9 channels switch their session identity at run time (ADR 0022). P5 (Linux shell build) was dropped at v19.2.1: upstream fixed it |
-| `scripts/` | `fetch-omp`, `replay-patches` (`git am --3way`), `patch-limits`, `update-check`, `lock-component` |
-| `omp.lock.json`, `components.lock` | Pinned omp commit; pinned third-party components (hashes are produced by `lock-component`, never typed) |
+| `scripts/` | `fetch-omp`, `replay-patches` (`git am --3way`), `patch-limits`, `update-check` |
+| `omp.lock.json` | Pinned omp commit |
 
 ```
 bun install
 bun test                      # all packages, the extension and scripts
 ```
 
-In the installed omp: `/login` -> CGS signs in with the device flow; `/cgs-doctor` and `/cgs-update` check and install components.
+In the installed omp: `/login` -> CGS signs in with the device flow.
 
 ## Decisions deliberately left open
 
@@ -35,7 +35,7 @@ These are owner decisions in the docs; the code takes them as required inputs in
 - **The omp build itself** (ADR 0012): P4 and P6-P10 replay cleanly on omp `v19.2.1` (`b55cd1bb66`) and the patched tree builds in the `cgscli-build` image (`docker/build.sh`, which installs the binary as `dist/cgs`) and starts. Branding is not finished: the version string, `APP_NAME`, config dir and setup wizard text still say omp; no update source exists. cgsconnect is loaded in-process by the extension (ADR 0014); the API origin is chosen by Bootstrap among the build-time candidates in `plugin/omp-extension/defaults.ts` (ADR 0015; `CGS_BASE_URL` replaces the list). Account switching is a session identity change (ADR 0022): the hub keeps a per-channel epoch and omp (P9) asks it for the wire session id; there are no per-channel slot credentials.
 - **Windows ConPTY** pty backend ([V1], measured 2026-11-26): ConPTY drops APC/DCS/PM/SOS from the child, so TSP cannot ride a Windows pty; it needs patch P1 (TSP over a pipe) or a bundled OpenConsole. `bunPty` still throws on win32.
 - **Server side** of the relay and device registration (`/api/devices`, `/api/relay/*`) does not exist in new-api yet; `remote/` is tested against a mock relay following `relay-protocol.md` (a proposal). `ctl` bodies are this implementation's assumption (see `remote/envelope.ts`).
-- **Bare CLI** (ADR 0024): cgscli ships only omp and the cgs components it needs. Chromium, the C/C++ toolchain, Git/bash and the like are the developer's to install. `components/`, `components.lock`, `/cgs-doctor` and `/cgs-update` predate that decision and are slated for removal.
+- **Bare CLI** (ADR 0024): cgscli ships only omp and the cgs components it needs. Chromium, the C/C++ toolchain, Git/bash and the like are the developer's to install. There is no component downloader, `doctor` or `components.lock`.
 
 ## License
 
