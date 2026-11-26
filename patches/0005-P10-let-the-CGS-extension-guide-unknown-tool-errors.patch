@@ -1,7 +1,7 @@
-From 844074389cb04ebc14b3939e5794d2b1bc5be051 Mon Sep 17 00:00:00 2001
+From 9a3f30a4872ab09e2e3cda7742ab4be35459a985 Mon Sep 17 00:00:00 2001
 From: Creeper23456 <Creeper23456@outlook.com>
 Date: Wed, 25 Nov 2026 23:03:11 +0800
-Subject: [PATCH 7/7] P10: let the CGS extension guide unknown tool errors
+Subject: [PATCH 5/6] P10: let the CGS extension guide unknown tool errors
 
 Reason: Declined tool names need actionable guidance without declaring or authorizing any additional tools (ADR 0023).
 Upstream: none (CGS-specific extension hook).
@@ -17,10 +17,10 @@ Pass the assistant API and just the outgoing names and descriptions to the advis
  create mode 100644 packages/agent/test/unknown-tool-guidance.test.ts
 
 diff --git a/packages/agent/src/agent-loop.ts b/packages/agent/src/agent-loop.ts
-index 2c3bfa9..303f050 100644
+index 0687906642..de6ace4384 100644
 --- a/packages/agent/src/agent-loop.ts
 +++ b/packages/agent/src/agent-loop.ts
-@@ -39,6 +39,9 @@ import {
+@@ -40,6 +40,9 @@ import {
  	copyCursorExecResolved,
  	getStreamingPartialJson,
  	kCursorExecResolved,
@@ -30,7 +30,7 @@ index 2c3bfa9..303f050 100644
  } from "@oh-my-pi/pi-ai/utils/block-symbols";
  import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
  import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
-@@ -3086,9 +3089,23 @@ function suggestToolNames(
+@@ -3125,9 +3128,23 @@ function suggestToolNames(
   */
  function formatToolNotFoundMessage(
  	name: string,
@@ -54,7 +54,7 @@ index 2c3bfa9..303f050 100644
  	const suggestions = suggestToolNames(name, tools, fallbackNames);
  	if (suggestions.length === 0) return `Tool ${name} not found`;
  	if (suggestions.length === 1) return `Tool ${name} not found. Did you mean ${suggestions[0]}?`;
-@@ -3248,7 +3265,9 @@ async function prepareToolCallDispatch(
+@@ -3287,7 +3304,9 @@ async function prepareToolCallDispatch(
  		const validate = (args: Record<string, unknown>): Record<string, unknown> | undefined => {
  			try {
  				if (!tool) {
@@ -65,7 +65,7 @@ index 2c3bfa9..303f050 100644
  				}
  				return validateAgentToolArguments(tool, { ...toolCall, arguments: args });
  			} catch (validationError) {
-@@ -3724,7 +3743,9 @@ async function executeToolCalls(
+@@ -3763,7 +3782,9 @@ async function executeToolCalls(
  		await runInActiveSpan(toolSpan, async () => {
  			try {
  				if (!tool) {
@@ -78,7 +78,7 @@ index 2c3bfa9..303f050 100644
  
 diff --git a/packages/agent/test/unknown-tool-guidance.test.ts b/packages/agent/test/unknown-tool-guidance.test.ts
 new file mode 100644
-index 0000000..4c74ba8
+index 0000000000..4c74ba8adb
 --- /dev/null
 +++ b/packages/agent/test/unknown-tool-guidance.test.ts
 @@ -0,0 +1,105 @@
@@ -188,7 +188,7 @@ index 0000000..4c74ba8
 +	});
 +}
 diff --git a/packages/ai/src/providers/anthropic.ts b/packages/ai/src/providers/anthropic.ts
-index 27c6842..808c2aa 100644
+index 27c68420f8..808c2aab89 100644
 --- a/packages/ai/src/providers/anthropic.ts
 +++ b/packages/ai/src/providers/anthropic.ts
 @@ -83,9 +83,12 @@ import {
@@ -235,7 +235,7 @@ index 27c6842..808c2aa 100644
  								const block: Block = {
  									type: "toolCall",
 diff --git a/packages/ai/src/utils/block-symbols.ts b/packages/ai/src/utils/block-symbols.ts
-index 8693521..da669f2 100644
+index 8693521d53..da669f2245 100644
 --- a/packages/ai/src/utils/block-symbols.ts
 +++ b/packages/ai/src/utils/block-symbols.ts
 @@ -222,3 +222,12 @@ export function setContextHistoryIndex(message: ContextHistoryIndexCarrier, inde
@@ -251,6 +251,3 @@ index 8693521..da669f2 100644
 +export type RequestToolRosterCarrier = object & {
 +	[kRequestToolRoster]?: readonly Readonly<{ name: string; description?: string }>[];
 +};
--- 
-2.47.3
-

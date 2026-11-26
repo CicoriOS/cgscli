@@ -1,7 +1,7 @@
-From fc7ab30232c124fe0bb9a2011f33aa5f3e27cf24 Mon Sep 17 00:00:00 2001
+From 1e589bebec326fb820142c59b5a088f3fcff3104 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Wed, 25 Nov 2026 14:51:30 +0800
-Subject: [PATCH 3/3] P6: list the cgs login first in getOAuthProviders
+Subject: [PATCH 2/6] P6: list the cgs login first in getOAuthProviders
 
 Reason: the CGS build wants its own sign-in as the first login entry everywhere (TUI /login, `omp login`, setup scene). All three take their order from getOAuthProviders(), which put extension-registered logins last.
 Upstream: none yet (CGS-specific ordering, not a candidate PR)
@@ -13,7 +13,7 @@ Remove-when: the build no longer ships the cgs extension or upstream lets extens
  create mode 100644 packages/ai/test/oauth-cgs-first.test.ts
 
 diff --git a/packages/ai/src/registry/oauth/index.ts b/packages/ai/src/registry/oauth/index.ts
-index f7da389..38fc88f 100644
+index f7da38993e..38fc88ff59 100644
 --- a/packages/ai/src/registry/oauth/index.ts
 +++ b/packages/ai/src/registry/oauth/index.ts
 @@ -31,6 +31,8 @@ const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
@@ -39,7 +39,7 @@ index f7da389..38fc88f 100644
  /** Provider id that stores `providerId`'s credentials: login aliases (`openai-codex-device`) map to their target (`openai-codex`). */
 diff --git a/packages/ai/test/oauth-cgs-first.test.ts b/packages/ai/test/oauth-cgs-first.test.ts
 new file mode 100644
-index 0000000..b1ecb77
+index 0000000000..b1ecb7772a
 --- /dev/null
 +++ b/packages/ai/test/oauth-cgs-first.test.ts
 @@ -0,0 +1,19 @@

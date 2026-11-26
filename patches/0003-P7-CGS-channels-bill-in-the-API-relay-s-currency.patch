@@ -1,7 +1,7 @@
-From 595ace6365bc00c69863067e5a8fbd83fdb41758 Mon Sep 17 00:00:00 2001
+From eed4dde182a2503d2ebeaee780e7b6b7fe7fe0d7 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
-Date: Wed, 25 Nov 2026 20:42:42 +0800
-Subject: [PATCH 4/4] P7: CGS channels bill in the API relay's currency
+Date: Thu, 26 Nov 2026 10:12:21 +0800
+Subject: [PATCH 3/6] P7: CGS channels bill in the API relay's currency
 
 Reason: CGS channels are billed by the API relay, in whatever currency the relay's console shows (yuan, dollars, or a custom symbol such as an emoji), not in dollars. The cgs extension reads that currency from the relay and exports the amount prefix in CGS_CURRENCY_PREFIX; omp prints it for cgs-* models in the model picker price column and the status line spend, and a new usage unit `currency` shows the relay wallet in it on /usage. omp's global stats (the stats database) record no cost for cgs-* (the relay has its own bill). The login and its four channels are shown as one provider name, Cicori Good Service. Every branch is new; other providers are unchanged.
 Upstream: none yet (CGS-specific provider prefix, not a candidate PR)
@@ -28,13 +28,13 @@ Remove-when: the build no longer ships the cgs extension, or upstream supports p
  create mode 100644 packages/stats/test/cgs-cost.test.ts
 
 diff --git a/packages/ai/src/usage.ts b/packages/ai/src/usage.ts
-index 2d1633b..113bae3 100644
+index 93ed65cf23..bd64b623a0 100644
 --- a/packages/ai/src/usage.ts
 +++ b/packages/ai/src/usage.ts
 @@ -6,7 +6,7 @@
   */
  import { type } from "@oh-my-pi/omptype";
- import type { FetchImpl, Provider } from "./types";
+ import type { FetchImpl, Provider, ServiceTier } from "./types";
 -export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 +export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "currency" | "minutes" | "bytes" | "unknown";
  
@@ -51,7 +51,7 @@ index 2d1633b..113bae3 100644
  
 diff --git a/packages/coding-agent/src/cgs-currency.ts b/packages/coding-agent/src/cgs-currency.ts
 new file mode 100644
-index 0000000..520c913
+index 0000000000..520c913761
 --- /dev/null
 +++ b/packages/coding-agent/src/cgs-currency.ts
 @@ -0,0 +1,24 @@
@@ -80,7 +80,7 @@ index 0000000..520c913
 +	return isCgsProvider(provider) ? cgsCurrencyPrefix() : "$";
 +}
 diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
-index 850dd83..f133f80 100644
+index 646989ccdd..b309097e9d 100644
 --- a/packages/coding-agent/src/cli/usage-cli.ts
 +++ b/packages/coding-agent/src/cli/usage-cli.ts
 @@ -28,6 +28,7 @@ import { AuthBrokerClient, AuthBrokerError } from "@oh-my-pi/pi-ai/auth-broker";
@@ -89,9 +89,9 @@ index 850dd83..f133f80 100644
  import { formatProviderName } from "../modes/view-model/chrome/format";
 +import { cgsCurrencyPrefix } from "../cgs-currency";
  import { peakBuckets, sparkline } from "@oh-my-pi/pi-tui/term/painters/chart";
- import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
+ import { errorMessage, formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
  import chalk from "@oh-my-pi/pi-utils/chalk";
-@@ -248,6 +249,7 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
+@@ -247,6 +248,7 @@ function aggregateStatus(limits: UsageLimit[]): LimitStatus {
  
  function formatUnitValue(value: number, unit: UsageUnit): string {
  	if (unit === "usd") return `$${value.toFixed(2)}`;
@@ -99,7 +99,7 @@ index 850dd83..f133f80 100644
  	// Metered balances (e.g. Codex spend-cap credits) arrive as fractional floats.
  	return formatNumber(value, 2);
  }
-@@ -260,6 +262,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
+@@ -259,6 +261,7 @@ const UNIT_SUFFIX: Record<UsageUnit, string> = {
  	bytes: " bytes",
  	percent: "",
  	usd: "",
@@ -108,7 +108,7 @@ index 850dd83..f133f80 100644
  };
  
 diff --git a/packages/coding-agent/src/modes/controllers/command-controller.ts b/packages/coding-agent/src/modes/controllers/command-controller.ts
-index 263da8f..c156f42 100644
+index 5c8463678c..61b451b52c 100644
 --- a/packages/coding-agent/src/modes/controllers/command-controller.ts
 +++ b/packages/coding-agent/src/modes/controllers/command-controller.ts
 @@ -73,6 +73,7 @@ import {
@@ -119,7 +119,7 @@ index 263da8f..c156f42 100644
  import { formatCompactQuota } from "../../advisor/advisor-config-types";
  import { resolveTernPane, type TernPane } from "../../tools/browser/tern/kind";
  import { TernError, type TernErrorKind, type TernForked, TernSocketClient } from "../../tools/browser/tern/wire";
-@@ -2573,7 +2574,9 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
+@@ -2576,7 +2577,9 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
  		const used =
  			limit.amount.unit === "usd"
  				? `$${usedAmount.toFixed(2)}`
@@ -131,10 +131,10 @@ index 263da8f..c156f42 100644
  	}
  	const fraction = resolveUsedFraction(limit);
 diff --git a/packages/coding-agent/src/modes/interactive/status-line.ts b/packages/coding-agent/src/modes/interactive/status-line.ts
-index 27a6bac..b0cf209 100644
+index 795d3fdebe..a504838ce4 100644
 --- a/packages/coding-agent/src/modes/interactive/status-line.ts
 +++ b/packages/coding-agent/src/modes/interactive/status-line.ts
-@@ -16,6 +16,7 @@ import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
+@@ -27,6 +27,7 @@ import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
  import * as vcs from "@oh-my-pi/pi-natives/vcs";
  import { type Accessor, computed, type Signal, signal } from "@oh-my-pi/pi-tui";
  import { getActiveProfile, getProjectDir } from "@oh-my-pi/pi-utils";
@@ -142,7 +142,7 @@ index 27a6bac..b0cf209 100644
  import type { AgentViewSession } from "../../session/agent-session-handle";
  import { latestJobWidget } from "../../tools/details/job-widget";
  import { BRAND_FADE_MS, type StatusFacts, type StatusLineSettings } from "../../ui/status/facts";
-@@ -505,6 +506,7 @@ export class SessionStatusLine implements StatusLineModel {
+@@ -647,6 +648,7 @@ export class SessionStatusLine implements StatusLineModel {
  				subagentCost: stats.subagentCost,
  			},
  			usingSubscription: model ? session.modelRegistry.isUsingSubscription(model) : false,
@@ -151,7 +151,7 @@ index 27a6bac..b0cf209 100644
  				? { subagentTreeCost: modes.subagentTreeCost }
  				: {}),
 diff --git a/packages/coding-agent/src/modes/view-model/chrome/format.ts b/packages/coding-agent/src/modes/view-model/chrome/format.ts
-index c1cf2d6..2e2aa2d 100644
+index c1cf2d6c1d..2e2aa2d86a 100644
 --- a/packages/coding-agent/src/modes/view-model/chrome/format.ts
 +++ b/packages/coding-agent/src/modes/view-model/chrome/format.ts
 @@ -1,5 +1,8 @@
@@ -164,7 +164,7 @@ index c1cf2d6..2e2aa2d 100644
  		.split(/[-_]/g)
  		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
 diff --git a/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts b/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
-index 6bf8440..18db524 100644
+index 6d01c555d3..7120239262 100644
 --- a/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
 +++ b/packages/coding-agent/src/modes/view-model/overlays/model-browser.ts
 @@ -11,6 +11,7 @@ import {
@@ -173,9 +173,9 @@ index 6bf8440..18db524 100644
  } from "@oh-my-pi/pi-catalog/models";
 +import { currencyPrefixFor } from "../../../cgs-currency";
  import { type ModelKind, type ModelPricingStatus, modelKind } from "@oh-my-pi/pi-catalog/types";
+ import { errorMessage } from "@oh-my-pi/pi-utils";
  import type { TspPickerColumn, TspPickerMark } from "@oh-my-pi/pi-wire";
- import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../../thinking/levels";
-@@ -981,7 +982,9 @@ function priceWith(model: Model, sep: string): string {
+@@ -1010,7 +1011,9 @@ function priceWith(model: Model, sep: string): string {
  	if (declared !== undefined) return PRICING_LABELS[declared].short;
  	if (isFreeModel(model)) return "free";
  	const cost = getEffectiveTokenCost(model.cost);
@@ -187,7 +187,7 @@ index 6bf8440..18db524 100644
  
  /** `$3/15` per-million price column. */
 diff --git a/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts b/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
-index be5220e..1554861 100644
+index be5220eaa6..15548612c5 100644
 --- a/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
 +++ b/packages/coding-agent/src/slash-commands/helpers/usage-amounts.ts
 @@ -1,4 +1,5 @@
@@ -205,7 +205,7 @@ index be5220e..1554861 100644
  	return `${formatted} ${unit} ${suffix}`;
  }
 diff --git a/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts b/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
-index 633dac5..45469d6 100644
+index 633dac5a35..45469d6a1d 100644
 --- a/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
 +++ b/packages/coding-agent/src/ui/overlays/panels/usage-dashboard-model.ts
 @@ -13,6 +13,7 @@ import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -225,7 +225,7 @@ index 633dac5..45469d6 100644
  	}
  	return formatRemainingOnlyTotal(limits);
 diff --git a/packages/coding-agent/src/ui/status/facts.ts b/packages/coding-agent/src/ui/status/facts.ts
-index f829687..d96bcd5 100644
+index f829687cbf..d96bcd5252 100644
 --- a/packages/coding-agent/src/ui/status/facts.ts
 +++ b/packages/coding-agent/src/ui/status/facts.ts
 @@ -98,6 +98,8 @@ export interface StatusFacts {
@@ -238,7 +238,7 @@ index f829687..d96bcd5 100644
  	readonly subagentTreeCost?: number;
  	readonly advisorCost?: { readonly cost: number; readonly usingSubscription: boolean };
 diff --git a/packages/coding-agent/src/ui/status/format.ts b/packages/coding-agent/src/ui/status/format.ts
-index 3a2515e..b219f31 100644
+index 3a2515eac8..b219f318aa 100644
 --- a/packages/coding-agent/src/ui/status/format.ts
 +++ b/packages/coding-agent/src/ui/status/format.ts
 @@ -58,6 +58,8 @@ export function formatContextUsage(percent: number | null, window: number, token
@@ -260,7 +260,7 @@ index 3a2515e..b219f31 100644
  		shown = billing.usingSubscription;
  	} else if (billing.usingSubscription) {
 diff --git a/packages/coding-agent/src/ui/status/segments.ts b/packages/coding-agent/src/ui/status/segments.ts
-index 2d52a58..31f1f8a 100644
+index 2d52a58ffa..31f1f8a18c 100644
 --- a/packages/coding-agent/src/ui/status/segments.ts
 +++ b/packages/coding-agent/src/ui/status/segments.ts
 @@ -445,6 +445,7 @@ function costSeg(input: SegInput): SegView | null {
@@ -273,7 +273,7 @@ index 2d52a58..31f1f8a 100644
  			pricingPeriod: facts.pricingPeriod,
 diff --git a/packages/coding-agent/test/cgs-currency.test.ts b/packages/coding-agent/test/cgs-currency.test.ts
 new file mode 100644
-index 0000000..2f57410
+index 0000000000..2f57410caf
 --- /dev/null
 +++ b/packages/coding-agent/test/cgs-currency.test.ts
 @@ -0,0 +1,51 @@
@@ -329,7 +329,7 @@ index 0000000..2f57410
 +	});
 +});
 diff --git a/packages/stats/src/db.ts b/packages/stats/src/db.ts
-index 62b5008..07a016d 100644
+index 62b5008589..07a016ddd6 100644
 --- a/packages/stats/src/db.ts
 +++ b/packages/stats/src/db.ts
 @@ -694,6 +694,8 @@ interface ResolvedCost {
@@ -343,7 +343,7 @@ index 62b5008..07a016d 100644
  	// `total`). The messages table declares every cost_* column as REAL NOT NULL,
 diff --git a/packages/stats/test/cgs-cost.test.ts b/packages/stats/test/cgs-cost.test.ts
 new file mode 100644
-index 0000000..c1de43b
+index 0000000000..c1de43b4ec
 --- /dev/null
 +++ b/packages/stats/test/cgs-cost.test.ts
 @@ -0,0 +1,40 @@
@@ -387,6 +387,3 @@ index 0000000..c1de43b
 +		expect(cost).toEqual({ anthropic: 3, "cgs-claude": 0, cgs: 0 });
 +	});
 +});
--- 
-2.47.3
-

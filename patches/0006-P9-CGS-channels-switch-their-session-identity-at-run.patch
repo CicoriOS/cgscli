@@ -1,6 +1,6 @@
-From 291fc5fcbf12119adcb80f3a8167c9905c0cd342 Mon Sep 17 00:00:00 2001
+From c698ccd987e869cd6c4e5728397421a8b41e0094 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
-Date: Wed, 25 Nov 2026 21:48:02 +0800
+Date: Thu, 26 Nov 2026 10:12:47 +0800
 Subject: [PATCH 6/6] P9: CGS channels switch their session identity at runtime
 
 The relay picks the upstream account; the client's answer to "move on" is to
@@ -26,7 +26,7 @@ Remove-when: upstream exposes a per-request session-identity hook for extension 
 
 diff --git a/packages/ai/src/cgs-session.ts b/packages/ai/src/cgs-session.ts
 new file mode 100644
-index 0000000..33c8a43
+index 0000000000..33c8a4386f
 --- /dev/null
 +++ b/packages/ai/src/cgs-session.ts
 @@ -0,0 +1,68 @@
@@ -99,18 +99,18 @@ index 0000000..33c8a43
 +	return wire === options.sessionId ? options : { ...options, sessionId: wire };
 +}
 diff --git a/packages/ai/src/stream.ts b/packages/ai/src/stream.ts
-index 0661e9d..ba25460 100644
+index 16662b97d3..5c81da48e6 100644
 --- a/packages/ai/src/stream.ts
 +++ b/packages/ai/src/stream.ts
-@@ -21,6 +21,7 @@ import {
+@@ -18,6 +18,7 @@ import {
  } from "@oh-my-pi/pi-catalog/model-thinking";
- import { $env, getProviderInFlightRoot, isEnoent, isPidAlive, logger, untilAborted } from "@oh-my-pi/pi-utils";
+ import { $env, logger } from "@oh-my-pi/pi-utils";
  import { getCustomApi } from "./api-registry";
 +import { withCgsSessionIdentity } from "./cgs-session";
  import {
+ 	type ApiKeyResolution,
  	createAuthRetryKeyState,
- 	isApiKeyResolver,
-@@ -910,7 +911,7 @@ function streamDispatch<TApi extends Api>(
+@@ -455,7 +456,7 @@ function streamDispatch<TApi extends Api>(
  	assertProviderEnabled(model.provider);
  	const requestOptions = withSupportedSamplingParams(
  		model,
@@ -121,7 +121,7 @@ index 0661e9d..ba25460 100644
  
 diff --git a/packages/ai/test/cgs-session.test.ts b/packages/ai/test/cgs-session.test.ts
 new file mode 100644
-index 0000000..c07aa03
+index 0000000000..c07aa03da0
 --- /dev/null
 +++ b/packages/ai/test/cgs-session.test.ts
 @@ -0,0 +1,75 @@
@@ -200,6 +200,3 @@ index 0000000..c07aa03
 +		expect(ANTHROPIC_PROVIDER_SESSION_STATE_KEY).toBe("anthropic-messages");
 +	});
 +});
--- 
-2.47.3
-
