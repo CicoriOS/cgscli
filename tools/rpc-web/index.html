@@ -1,0 +1,75 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cgs rpc</title>
+<style>
+  body { font: 13px/1.4 ui-monospace, monospace; margin: 0; display: flex; flex-direction: column; height: 100vh; background: #111; color: #ddd; }
+  #bar { padding: 6px 10px; background: #1b1b1b; display: flex; gap: 10px; align-items: center; }
+  #bar b.ok { color: #6c6 } #bar b.off { color: #e66 }
+  #log { flex: 1; overflow: auto; padding: 6px 10px; }
+  details { border-left: 3px solid #444; margin: 1px 0; padding-left: 8px; }
+  details.in { border-color: #4a8; } details.err { border-color: #e66; }
+  summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  summary .t { color: #8ab; } summary .p { color: #888; }
+  pre { margin: 2px 0 6px; white-space: pre-wrap; word-break: break-all; color: #bbb; }
+  #text { padding: 8px; background: #1b1b1b; display: flex; flex-direction: column; gap: 6px; }
+  #text div { display: flex; gap: 6px; } #text input, #text textarea { flex: 1; background: #000; color: #ddd; border: 1px solid #444; padding: 4px; font: inherit; }
+  button { background: #333; color: #ddd; border: 1px solid #555; padding: 4px 10px; cursor: pointer; }
+  label { color: #999; }
+</style>
+<div id="bar"><b id="st" class="off">disconnected</b><span id="n">0 frames</span>
+  <label><input type="checkbox" id="stream"> show message_update</label>
+  <button id="open">expand all</button><button id="close">collapse all</button><button id="clear">clear</button></div>
+<div id="log"></div>
+<div id="text">
+  <div><input id="msg" placeholder="prompt (Enter sends)"><button id="send">prompt</button><button id="abort">abort</button></div>
+  <div><textarea id="raw" rows="2" placeholder='raw frame, e.g. {"type":"get_state"}  (Ctrl+Enter sends)'></textarea><button id="sendraw">send raw</button></div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id), log = $("log");
+let ws, count = 0, seq = 0;
+const stuck = () => log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+
+function add(dir, text) {
+  let obj, label = "?", preview = "";
+  try {
+    obj = JSON.parse(text);
+    label = obj.type + (obj.command ? ":" + obj.command : "");
+    if (obj.type === "message_update" && !$("stream").checked) { count++; $("n").textContent = count + " frames"; return; }
+    preview = text.length > 160 ? text.slice(0, 160) + "…" : text;
+  } catch { preview = text; }
+  const d = document.createElement("details");
+  d.className = dir + (obj && obj.success === false ? " err" : "");
+  const s = document.createElement("summary");
+  s.innerHTML = `<span class="t"></span> <span class="p"></span>`;
+  s.firstChild.textContent = (dir === "in" ? "→ " : "← ") + label;
+  s.lastChild.textContent = preview;
+  const pre = document.createElement("pre");
+  pre.textContent = obj ? JSON.stringify(obj, null, 2) : text;
+  d.append(s, pre);
+  const follow = stuck();
+  log.append(d);
+  if (follow) log.scrollTop = log.scrollHeight;
+  count++; $("n").textContent = count + " frames";
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => { $("st").textContent = "connected"; $("st").className = "ok"; };
+  ws.onclose = () => { $("st").textContent = "disconnected"; $("st").className = "off"; setTimeout(connect, 1500); };
+  ws.onmessage = (e) => add("out", e.data);
+}
+function send(obj) {
+  const text = typeof obj === "string" ? obj : JSON.stringify(obj);
+  if (ws.readyState !== 1) return;
+  ws.send(text); add("in", text);
+}
+$("send").onclick = () => { if ($("msg").value) { send({ id: "w" + ++seq, type: "prompt", message: $("msg").value }); $("msg").value = ""; } };
+$("msg").onkeydown = (e) => { if (e.key === "Enter") $("send").click(); };
+$("abort").onclick = () => send({ id: "w" + ++seq, type: "abort" });
+$("sendraw").onclick = () => { const v = $("raw").value.trim(); if (v) { send(v); $("raw").value = ""; } };
+$("raw").onkeydown = (e) => { if (e.key === "Enter" && e.ctrlKey) $("sendraw").click(); };
+$("open").onclick = () => document.querySelectorAll("details").forEach((d) => d.open = true);
+$("close").onclick = () => document.querySelectorAll("details").forEach((d) => d.open = false);
+$("clear").onclick = () => { log.textContent = ""; count = 0; $("n").textContent = "0 frames"; };
+connect();
+</script>
