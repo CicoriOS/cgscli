@@ -2,6 +2,8 @@
 
 **cgscli is the omp we distribute** (a CGS build of omp with patches and pre-installed extensions, ADR 0012), not a separate program. This repo holds the extension, patches, build/sync scripts, and the optional `cgsconnect` library. Design documents: `../cgs-client-docs` (the source of truth; if code and docs disagree, fix the docs first).
 
+The RPC web prototype has been retired. The web client now lives on `ompweb-desktop`'s `next` branch, with the local RPC bridge in [`bridge/`](https://github.com/CicoriOS/cgs-desktop/tree/next/bridge).
+
 | Path | What |
 |---|---|
 | `packages/wire` | Message contract (`Duplex`, hello/welcome, message families), TSP APC framing, replay buffer |
