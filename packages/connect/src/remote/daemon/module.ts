@@ -3,6 +3,7 @@
 // process can read the switch without waking the daemon), else under the module's own state dir.
 import path from "node:path";
 import { defaultDeps, RemoteUnit, type Configure } from "./unit.ts";
+import type { LiveTunnel } from "./live.ts";
 
 type Exit = { exitCode?: number; reason?: string };
 
@@ -12,7 +13,7 @@ export interface RemoteDaemonUnit {
   exited: Promise<Exit>;
   pids(): number[];
   busy(): boolean;
-  attach(tunnel: { close(): void }): void;
+  attach(tunnel: LiveTunnel, channel: string | undefined): void;
   stop(reason: string): Promise<void>;
   invoke(method: string, params: unknown): Promise<unknown>;
 }
@@ -54,7 +55,7 @@ export async function open(stateDir: string, key: string, params: unknown): Prom
     exited: exited.promise,
     pids: () => [],
     busy: () => unit.busy(),
-    attach: (tunnel) => tunnel.close(),
+    attach: (tunnel, channel) => unit.attachLive(tunnel, channel),
     async stop(reason) {
       await unit.stop();
       exited.resolve({ reason });

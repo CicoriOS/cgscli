@@ -51,6 +51,8 @@ export interface SocketHandlers {
   onOpen(cid: string): void;
   onFrame(cid: string, text: string): void;
   onClose(cid: string, reason: string): void;
+  /** A live terminal took the session over (ADR 0027): the stream ends and the browser learns by whom. */
+  onTakenOver?(cid: string, by: string): void;
 }
 
 export interface Host {

@@ -1,7 +1,7 @@
-From ef27550dd378967baf0c3c80696637dc17f0d8a6 Mon Sep 17 00:00:00 2001
+From f9c9fea70c79a97b96bbdc6effc192bcbcd9dc9f Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Thu, 26 Nov 2026 22:53:29 +0800
-Subject: [PATCH] P16: update from the cgscli GitHub release
+Subject: [PATCH 10/11] P16: update from the cgscli GitHub release
 
 Reason: A CGS build must update from the cgscli release, never from omp's channels (they would replace it with upstream omp). The source, the installer and the verification are inside update-cli and the startup check, which the extension API cannot reach.
 Upstream: none (distribution-specific update source)
@@ -12,13 +12,13 @@ Remove-when: CGS stops shipping a branded omp build
 - startup check and auto-update offer only that release; the notice says `cgs update`
 - replaces the P4 gate that disabled updating unless PI_BUILD_URL was set
 ---
- packages/coding-agent/src/cli/cgs-release.ts  | 50 ++++++++++++++++++
- packages/coding-agent/src/cli/update-cli.ts   | 47 ++++++++++++++---
- packages/coding-agent/src/main.ts             | 23 +++-----
+ packages/coding-agent/src/cli/cgs-release.ts  | 50 +++++++++++
+ packages/coding-agent/src/cli/update-cli.ts   | 84 +++++++++----------
+ packages/coding-agent/src/main.ts             | 23 ++---
  .../src/modes/interactive/update-notice.tsx   |  2 +-
- .../coding-agent/test/cgs-release.test.ts     | 52 +++++++++++++++++++
- packages/coding-agent/test/update-cli.test.ts | 16 +++---
- 6 files changed, 158 insertions(+), 32 deletions(-)
+ .../coding-agent/test/cgs-release.test.ts     | 54 ++++++++++++
+ packages/coding-agent/test/update-cli.test.ts | 16 ++--
+ 6 files changed, 160 insertions(+), 69 deletions(-)
  create mode 100644 packages/coding-agent/src/cli/cgs-release.ts
  create mode 100644 packages/coding-agent/test/cgs-release.test.ts
 
@@ -79,7 +79,7 @@ index 0000000000..030820abc2
 +	return parseCgsRelease(await response.json());
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 9a2f5c55c1..012d653f5f 100644
+index 9a2f5c55c1..5c403905cc 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -42,6 +42,7 @@ import {
@@ -99,24 +99,53 @@ index 9a2f5c55c1..012d653f5f 100644
  	if (!ompPath) return { ok: false };
  	const binaryPath = tryRealpath(ompPath) ?? ompPath;
  	return await verifyBinaryAtPath(binaryPath, expectedVersion);
-@@ -2319,6 +2320,43 @@ async function runManagedUpdate(
- 	return { kind: "installed", version: installed };
+@@ -2320,59 +2321,56 @@ async function runManagedUpdate(
  }
  
-+/**
+ /**
+- * Run the update command.
+- *
+- * The installer that owns the PATH `omp` decides where the version comes
+- * from: a standalone binary asks the build service, a package-manager install
+- * asks npm. When no target resolves, the running build's kind decides, so
+- * `--check` still answers; installing then fails on the unresolved target.
+- *
+- * Progress and results print to stdout. Throws when the check or the install
+- * fails, or when another update holds the install lock.
 + * Update from the newest cgscli release (see {@link fetchCgsRelease}): the release's `cgscli` tarball is installed with
 + * `bun install -g`, which replaces the global package and every tarball it depends on.
-+ */
+  */
+-export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
+-	if (!$env.PI_BUILD_URL?.trim()) {
+-		const reason = "This is the CGS build of omp; set PI_BUILD_URL to a CGS build service to update it.";
+-		console.log(chalk.yellow(reason));
+-		return { kind: "unsupported", reason };
+-	}
+-	const ompPath = resolveOmpPath();
+-	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
+-	if (manager) {
+-		const reason = `${ompPath} is installed and kept up to date by ${manager}; update it from ${manager}.`;
+-		console.log(chalk.yellow(reason));
+-		return { kind: "unsupported", reason };
+-	}
+-	// `update.channel` picks the channel; --canary/--stable switch and persist it.
+-	await Settings.init({ cwd: getProjectDir() });
 +async function runCgsUpdate(opts: UpdateOptions): Promise<UpdateOutcome> {
-+	console.log(chalk.dim(`Current version: ${VERSION}`));
-+	const request: UpdateRequest = {
-+		force: opts.force,
-+		check: opts.check,
+ 	console.log(chalk.dim(`Current version: ${VERSION}`));
+-	const persistedChannel = readPersistedChannel() ?? "stable";
+-	const channel = opts.channel ?? persistedChannel;
+-	if (channel === "canary") console.log(chalk.dim("Current channel: canary"));
+ 	const request: UpdateRequest = {
+ 		force: opts.force,
+ 		check: opts.check,
+-		channel,
+-		isChannelSwitch: opts.channel !== undefined && opts.channel !== persistedChannel,
+-		persistChannel: opts.channel !== undefined,
 +		channel: "stable",
 +		isChannelSwitch: false,
 +		persistChannel: false,
-+		onProgress: opts.onProgress,
-+	};
+ 		onProgress: opts.onProgress,
+ 	};
 +	let release: CgsRelease;
 +	try {
 +		release = await fetchCgsRelease();
@@ -125,38 +154,50 @@ index 9a2f5c55c1..012d653f5f 100644
 +	}
 +	if (!announceOffer(release.version, request)) return { kind: "current" };
 +	if (request.check) return { kind: "available", version: release.version };
-+
+ 
+-	const lock = opts.check ? undefined : acquireInstallLock();
 +	const lock = acquireInstallLock();
-+	try {
+ 	try {
+-		let target: UpdateTarget | undefined;
+-		let targetError: unknown;
+-		try {
+-			target = await resolveUpdateTarget({ allowPackageManagers: true });
+-		} catch (err) {
+-			targetError = err;
+-		}
+-		if (target?.method === "binary") return await runBinaryUpdate(target, targetError, request);
+-		if (!target && isCompiledBinary()) return await runBinaryUpdate(undefined, targetError, request);
+-		return await runManagedUpdate(target, targetError, request);
 +		request.onProgress?.({ phase: "installing", version: release.version });
 +		const exitCode = await runInstaller(["bun", "install", "-g", release.tarball]);
 +		if (exitCode !== 0) throw new Error(`bun install failed with exit code ${exitCode}`);
 +		await finishVerifiedUpdate(await verifyInstalledVersion(release.version), release.version);
 +	} catch (err) {
 +		throw updateError("Update failed", err);
-+	} finally {
+ 	} finally {
+-		lock?.release();
 +		lock.release();
-+	}
+ 	}
 +	return { kind: "installed", version: release.version };
 +}
 +
- /**
-  * Run the update command.
-  *
-@@ -2331,11 +2369,8 @@ async function runManagedUpdate(
-  * fails, or when another update holds the install lock.
-  */
- export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
--	if (!$env.PI_BUILD_URL?.trim()) {
--		const reason = "This is the CGS build of omp; set PI_BUILD_URL to a CGS build service to update it.";
--		console.log(chalk.yellow(reason));
--		return { kind: "unsupported", reason };
--	}
-+	// CGS build: the only source is the cgscli GitHub release (P16); omp's own channels stay unreachable below.
++/**
++ * Run the update command.
++ *
++ * The installer that owns the PATH `omp` decides where the version comes
++ * from: a standalone binary asks the build service, a package-manager install
++ * asks npm. When no target resolves, the running build's kind decides, so
++ * `--check` still answers; installing then fails on the unresolved target.
++ *
++ * Progress and results print to stdout. Throws when the check or the install
++ * fails, or when another update holds the install lock.
++ */
++export async function runUpdateCommand(opts: UpdateOptions): Promise<UpdateOutcome> {
++	// CGS build: the only source is the cgscli GitHub release (P16); omp's own channels are never asked.
 +	return await runCgsUpdate(opts);
- 	const ompPath = resolveOmpPath();
- 	const manager = ompPath ? await managedInstallName(ompPath) : undefined;
- 	if (manager) {
+ }
+ 
+ /**
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
 index 545f688a32..a461de03ab 100644
 --- a/packages/coding-agent/src/main.ts
@@ -229,10 +270,10 @@ index b606fa44e6..92349efda7 100644
  	const prefix = `New version ${props.version} is available. Run: `;
 diff --git a/packages/coding-agent/test/cgs-release.test.ts b/packages/coding-agent/test/cgs-release.test.ts
 new file mode 100644
-index 0000000000..e88c335e7f
+index 0000000000..b3c808fa5e
 --- /dev/null
 +++ b/packages/coding-agent/test/cgs-release.test.ts
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,54 @@
 +import { afterEach, describe, expect, test } from "bun:test";
 +import { fetchCgsRelease, parseCgsRelease } from "../src/cli/cgs-release";
 +
@@ -266,15 +307,17 @@ index 0000000000..e88c335e7f
 +
 +	test("reads latest.json from CGS_RELEASE_URL and sends no omp channel request", async () => {
 +		const seen: string[] = [];
++		let origin = "";
 +		using server = Bun.serve({
 +			port: 0,
 +			hostname: "127.0.0.1",
 +			fetch(req) {
 +				seen.push(new URL(req.url).pathname);
-+				return Response.json({ version: "19.2.1-cgs.2", tarball: `http://127.0.0.1:${server.port}/cgscli-19.2.1-cgs.2.tgz` });
++				return Response.json({ version: "19.2.1-cgs.2", tarball: `${origin}/cgscli-19.2.1-cgs.2.tgz` });
 +			},
 +		});
-+		process.env.CGS_RELEASE_URL = `http://127.0.0.1:${server.port}/releases/`;
++		origin = `http://127.0.0.1:${server.port}`;
++		process.env.CGS_RELEASE_URL = `${origin}/releases/`;
 +		expect((await fetchCgsRelease()).version).toBe("19.2.1-cgs.2");
 +		expect(seen).toEqual(["/releases/latest.json"]);
 +	});

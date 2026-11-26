@@ -34,7 +34,7 @@ export interface SessionsOptions {
   handshakeTimeoutMs?: number;
 }
 
-type Phase = "pre" | "waiting" | "control";
+type Phase = "pre" | "waiting" | "control" | "readonly";
 
 interface Session {
   sid: string;
@@ -245,6 +245,12 @@ export class Sessions {
           onClose: (_k, reason) => {
             s.cids.delete(message.cid);
             void this.#send(s, { k: "close", cid: message.cid, reason });
+          },
+          onTakenOver: (_k, by) => {
+            s.cids.delete(message.cid);
+            this.#release(s);
+            s.phase = "readonly";
+            void this.#send(s, { k: "taken_over", by });
           },
         });
         return;

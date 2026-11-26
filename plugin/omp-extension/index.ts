@@ -5,7 +5,7 @@ import { deviceLogin } from "./login.ts";
 import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type LayoutResult, type ModelManifest, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
-import { registerConnectCommand } from "./connect.ts";
+import { registerConnectCommand, type ConnectExtensionApi } from "./connect.ts";
 import { providerTransport } from "./provider-transport.ts";
 import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // omp extension: registers the CGS channels from the manifest of cgsconnect, which runs inside the omp process as a
@@ -195,7 +195,7 @@ export function registerAgentCommand(pi: ExtensionApi, o: { agentDir: string; fe
 
 const SESSION_IDENTITY_HOOK = Symbol.for("cgscli.sessionIdentity");
 
-export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
+export default async function cgsExtension(pi: ExtensionApi & ConnectExtensionApi): Promise<void> {
   const home = process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs");
   const connect = createConnect({ upstream: candidatesFrom(), cloudflare: cloudflareFrom(), dataDir: path.join(home, "connect") });
   // omp patch P9 asks here for the wire session id of every cgs-* request (ADR 0022); a stock omp never asks.

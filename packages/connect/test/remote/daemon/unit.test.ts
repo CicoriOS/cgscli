@@ -52,6 +52,7 @@ class FakeHost implements Host {
   streams = new Map<string, SocketHandlers>();
   async request(req: { method: string; path: string }) {
     this.requests.push(req);
+    if (req.path === "/api/children" && req.method === "GET") return { status: 200, body: { children: [] } };
     // Like the real host: optional fields are present as undefined, which JSON would drop.
     return { status: 200, body: { echo: req.path, title: undefined } };
   }
@@ -177,6 +178,43 @@ async function enabledWorld(): Promise<World> {
   await w.unit.enable();
   return w;
 }
+
+test("a live terminal uses its lease and the wire revokes the browser, not the running session", async () => {
+  const w = await enabledWorld();
+  let data!: (chunk: Uint8Array) => void;
+  const writes: string[] = [];
+  let closed = false;
+  w.unit.attachLive({
+    start(onData) { data = onData; },
+    send(line) { writes.push(String(line)); return true; },
+    close() { closed = true; },
+  }, "live:test");
+  const publish = (f: object) => data(new TextEncoder().encode(`${JSON.stringify(f)}\n`));
+  publish({ type: "live_hello", cwd: "/workspace", sessionPath: "/sessions/live.jsonl", updatedAt: 1 });
+  const page = new Browser(w.links[0]!, "remote", new MemoryStore(), "Phone", PASSWORD);
+  await page.connect();
+  await page.say({ k: "req", id: "list", path: "/api/children", method: "GET" });
+  expect(page.got("res")).toMatchObject({ body: { children: [{ id: "live:test", cwd: "/workspace" }] } });
+  await page.say({ k: "req", id: "open", path: "/api/children", method: "POST", body: { sessionPath: "/sessions/live.jsonl" } });
+  expect(w.host.requests.every(r => r.method !== "POST")).toBe(true);
+  await page.say({ k: "open", cid: "c1", path: "/ws?child=live%3Atest" });
+  expect(writes).toEqual(['{"type":"remote_attached"}\n']);
+  publish({ type: "live_ready" });
+  await page.say({ k: "frame", cid: "c1", text: '{"type":"get_state"}' });
+  expect(writes.at(-1)).toBe('>{"type":"get_state"}\n');
+  publish({ type: "agent_start" });
+  publish({ type: "taken_over" });
+  await page.pump();
+  expect(page.got("frame")).toMatchObject({ text: '{"type":"agent_start"}' });
+  expect(page.got("taken_over")).toMatchObject({ by: expect.stringContaining("Test PC") });
+  expect(closed).toBe(false);
+  const count = writes.length;
+  await page.say({ k: "open", cid: "stale", path: "/ws?child=live%3Atest" });
+  await page.say({ k: "frame", cid: "c1", text: '{"type":"abort"}' });
+  expect(writes.length).toBe(count);
+  await w.unit.disable();
+  expect(closed).toBe(true);
+});
 
 describe("the device switch", () => {
   test("enabling needs a password first, and the server's refusal leaves the switch off", async () => {

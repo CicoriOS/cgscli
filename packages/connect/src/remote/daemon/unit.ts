@@ -1,9 +1,10 @@
 // One device's remote access inside the omp daemon (ADR 0025, 0036): the persistent switch and credentials, the outbound
 // relay link, the sessions behind it and the session host. Everything is injected so it runs and tests without omp.
 // The omp-facing shell is module.ts.
-import { createHost, type Host, type HostOptions } from "../host/index.ts";
+import { createHost, type ChildStatus, type Host, type HostOptions } from "../host/index.ts";
 import { DeviceRelay, remoteApi, type RelayAccount, type RelayCallbacks } from "./relay.ts";
 import { Sessions, type SessionsStatus } from "./sessions.ts";
+import { LiveRegistry, type LiveTunnel } from "./live.ts";
 import { RemoteStateFile, type RemoteState } from "./store.ts";
 import {
   addBrowser,
@@ -85,6 +86,7 @@ export class RemoteUnit {
   #refused: number | null = null;
   #state: RemoteState | null = null;
   readonly #sessions: Sessions;
+  readonly #live = new LiveRegistry(() => this.#cfg?.deviceName ?? "this computer");
 
   constructor(deps: UnitDeps) {
     this.#deps = deps;
@@ -212,6 +214,11 @@ export class RemoteUnit {
     return this.#sessions.status().authenticated > 0;
   }
 
+  /** A TUI on this device stands by as a live session (ADR 0027). Refused unless remote access is on. */
+  attachLive(tunnel: LiveTunnel, channel: string | undefined): void {
+    this.#live.attach(channel ?? "", tunnel, this.#state?.enabled === true);
+  }
+
   async stop(): Promise<void> {
     this.#stopLink();
     await this.#host?.shutdown();
@@ -238,10 +245,33 @@ export class RemoteUnit {
       return this.#host;
     };
     return {
-      request: (req) => ensure().request(req),
-      open: (cid, path, handlers) => ensure().open(cid, path, handlers),
-      frame: (cid, text) => ensure().frame(cid, text),
-      close: (cid) => this.#host?.close(cid),
+      request: async (req) => {
+        const url = new URL(req.path, "http://host.invalid");
+        if (url.pathname === "/api/children" && req.method === "POST") {
+          // A session file a live terminal already runs is that terminal: the browser joins it, no second child spawns.
+          const body: unknown = req.body;
+          const file = typeof body === "object" && body !== null && "sessionPath" in body ? body.sessionPath : undefined;
+          const live = typeof file === "string" ? this.#live.findBySession(file) : undefined;
+          if (live) return { status: 200, body: live };
+        }
+        const res = await ensure().request(req);
+        if (req.method !== "GET" || url.pathname !== "/api/children") return res;
+        const body: unknown = res.body;
+        if (typeof body !== "object" || body === null || !("children" in body) || !Array.isArray(body.children)) return res;
+        const live = this.#live.list();
+        const liveFiles = new Set(live.map((c) => c.sessionPath));
+        const children = (body.children as ChildStatus[]).filter((c) => c.sessionPath === undefined || !liveFiles.has(c.sessionPath));
+        return { ...res, body: { ...body, children: [...children, ...live] } };
+      },
+      open: (cid, path, handlers) => {
+        if (!this.#live.open(cid, path, handlers)) ensure().open(cid, path, handlers);
+      },
+      frame: (cid, text) => {
+        if (!this.#live.frame(cid, text)) ensure().frame(cid, text);
+      },
+      close: (cid) => {
+        if (!this.#live.close(cid)) this.#host?.close(cid);
+      },
       shutdown: async () => this.#host?.shutdown(),
     };
   }
@@ -272,6 +302,7 @@ export class RemoteUnit {
     const link = this.#link;
     this.#link = null;
     this.#sessions.closeAll();
+    this.#live.closeAll();
     link?.stop();
   }
 

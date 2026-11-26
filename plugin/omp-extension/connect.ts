@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { proxyFor } from "@cgscli/connect";
+import { LIVE_BUSY_LINE, LIVE_READY_LINE, REMOTE_ATTACHED_LINE, REMOTE_DETACHED_LINE, RPC_INPUT_PREFIX, TAKEN_OVER_LINE } from "../../packages/connect/src/remote/daemon/live.ts";
 import { readAccount, type Account } from "./account.ts";
 
 // `/connect`: this device's remote access (ADR 0036). The relay link, the password check and the sessions live in the
@@ -21,8 +22,11 @@ interface UiContext {
   confirm?(title: string, message: string): Promise<boolean>;
 }
 interface CommandContext { ui: UiContext }
-interface ExtensionApi {
+export interface ConnectExtensionApi {
   registerCommand(name: string, options: { description?: string; handler(args: string, ctx: CommandContext): Promise<void> }): void;
+  on(event: "tui_attach", handler: (event: TuiAttachEvent) => void): void;
+  on(event: "session_shutdown", handler: () => void): void;
+  on(event: "session_switch" | "agent_start" | "agent_end", handler: () => void): void;
 }
 
 /** What the unit says about itself (see RemoteUnit.status). */
@@ -37,7 +41,44 @@ export interface UnitStatus {
   fingerprint: { emoji: string[] };
 }
 
-export interface UnitPort { call<T>(method: string, params?: unknown): Promise<T> }
+export interface TunnelPort {
+  send(data: string): boolean;
+  start(onData: (chunk: Uint8Array) => void, onClose: (reason: string | null) => void): void;
+  close(): void;
+}
+
+/** The TUI's attach handle (ADR 0027): `send` takes one encoded RPC line; `receive` takes a parsed frame. */
+export interface TuiAttachHandle {
+  receive(frame: unknown): void;
+  close(): void;
+}
+
+export interface LiveSession {
+  cwd: string;
+  sessionPath?: string;
+  title?: string;
+  ring?: "idle" | "work" | "think";
+  level?: string;
+  unseen?: boolean;
+}
+
+export interface TuiAttachEvent {
+  /** Read at every hello. The session file is absent until the first prompt of an unloaded or new session. */
+  session(): LiveSession;
+  attach(send: (line: string) => void): TuiAttachHandle;
+}
+
+export interface UnitPort {
+  call<T>(method: string, params?: unknown): Promise<T>;
+  attach(channel: string): Promise<TunnelPort>;
+}
+
+/** One live registration: the daemon tunnel stays up while remote access is on. `handle` is held only while a browser is attached. */
+interface Registration {
+  tunnel: TunnelPort;
+  send(line: string): void;
+  handle?: TuiAttachHandle;
+}
 
 export interface ConnectOptions {
   agentDir: string;
@@ -69,6 +110,7 @@ const here = () => fileURLToPath(new URL("../../packages/connect/src/remote/daem
 interface DaemonClientLike {
   open(request: { kind: string; scope: { kind: "global" }; key: string; label: string; lease: boolean; params: unknown }): Promise<{ unit: { id: string } }>;
   call<T>(module: string, method: string, params: unknown, options: { unit: string }): Promise<T>;
+  attach(unit: string, channel: string): Promise<TunnelPort>;
 }
 
 /**
@@ -80,7 +122,10 @@ async function openDaemonUnit(file: string): Promise<UnitPort> {
   if (!host.daemonClient) throw new Error("This omp build has no cgsconnect daemon module.");
   const client = await host.daemonClient();
   const opened = await client.open({ kind: "cgsconnect", scope: { kind: "global" }, key: UNIT_KEY, label: "CGS remote access", lease: true, params: { impl: here(), stateFile: file } });
-  return { call: <T>(method: string, params?: unknown) => client.call<T>("cgsconnect", method, params, { unit: opened.unit.id }) };
+  return {
+    call: <T>(method: string, params?: unknown) => client.call<T>("cgsconnect", method, params, { unit: opened.unit.id }),
+    attach: (channel: string) => client.attach(opened.unit.id, channel),
+  };
 }
 
 const MESSAGES: Record<string, string> = {
@@ -106,6 +151,12 @@ export interface Connect {
   resume(): Promise<void>;
   /** The /connect handler. */
   run(args: string, ctx: CommandContext): Promise<void>;
+  /** The TUI event (ADR 0027): this terminal stands by as a live session while remote access is on. */
+  tuiAttach(event: TuiAttachEvent): void;
+  /** The TUI is going away: its live registration ends. */
+  stopTui(): void;
+  /** The session changed or a run started or ended: re-sends the live hello (ADR 0027). */
+  refreshHello(): void;
 }
 
 export function createConnect(o: ConnectOptions): Connect {
@@ -115,6 +166,124 @@ export function createConnect(o: ConnectOptions): Connect {
   const open = o.openUnit ?? openDaemonUnit;
   const account = () => (o.readAccount ?? readAccount)(o.agentDir);
   let unit: Promise<UnitPort> | undefined;
+  /** The TUI this process runs (ADR 0027). Set while it exists, whether or not remote access is on. */
+  let tui: TuiAttachEvent | undefined;
+  /** The live registration with the unit. Exists only while remote access is on; detaching a browser does not end it. */
+  let registration: Registration | undefined;
+  let registering = false;
+  const background = (e: unknown): void => { process.stderr.write(`cgs: remote access: ${describe(e)}\n`); };
+
+  /** Ends a registration. The tunnel closes too unless the unit already closed it; a held TUI handle always closes. */
+  function unregister(r: Registration, closeTunnel: boolean): void {
+    if (registration === r) registration = undefined;
+    r.handle?.close();
+    r.handle = undefined;
+    if (closeTunnel) r.tunnel.close();
+  }
+
+  /** Sends the TUI's current session. Runs at registration and on the session events, so new, switched and unloaded sessions stay accurate. */
+  function sendHello(r: Registration): void {
+    const s = tui?.session();
+    if (!s) return;
+    r.send(JSON.stringify({ type: "live_hello", cwd: s.cwd, sessionPath: s.sessionPath, title: s.title, ring: s.ring, level: s.level, unseen: s.unseen, updatedAt: now() }));
+  }
+
+  /** Registers the TUI as a live session: one daemon tunnel, no child process. Nothing registers while remote access is off. */
+  async function registerTui(port?: UnitPort): Promise<void> {
+    const a = account();
+    if (!tui || registration || registering || !a || (!port && !switchIsOn())) return;
+    registering = true;
+    try {
+      port ??= await ready(a);
+      const tunnel = await port.attach(`live:${crypto.randomUUID()}`);
+      if (!tui || registration) {
+        tunnel.close();
+        return;
+      }
+      const send = (line: string): void => {
+        tunnel.send(line.endsWith("\n") ? line : `${line}\n`);
+      };
+      const r: Registration = { tunnel, send };
+      registration = r;
+      const decoder = new TextDecoder();
+      let rest = "";
+      tunnel.start(
+        (chunk) => {
+          rest += decoder.decode(chunk, { stream: true });
+          for (let i = rest.indexOf("\n"); i >= 0; i = rest.indexOf("\n")) {
+            const line = rest.slice(0, i);
+            rest = rest.slice(i + 1);
+            if (registration !== r) return;
+            if (line === REMOTE_ATTACHED_LINE) {
+              const event = tui;
+              if (!event || r.handle) continue;
+              try {
+                let opening: string[] | undefined = [];
+                r.handle = event.attach((frame) => {
+                  if (frame.trimEnd() === TAKEN_OVER_LINE) r.handle = undefined;
+                  if (opening) opening.push(frame);
+                  else send(frame);
+                });
+                send(LIVE_READY_LINE);
+                for (const frame of opening) send(frame);
+                opening = undefined;
+              } catch {
+                send(LIVE_BUSY_LINE);
+              }
+            } else if (line === REMOTE_DETACHED_LINE) {
+              r.handle?.close();
+              r.handle = undefined;
+            } else if (r.handle && line.startsWith(RPC_INPUT_PREFIX)) {
+              let frame: unknown;
+              try {
+                frame = JSON.parse(line.slice(RPC_INPUT_PREFIX.length));
+              } catch {
+                continue;
+              }
+              r.handle.receive(frame);
+            }
+          }
+        },
+        () => unregister(r, false),
+      );
+      if (registration === r) sendHello(r);
+    } finally {
+      registering = false;
+    }
+  }
+
+  // Another running TUI can enable the per-device switch. The state file is atomically replaced;
+  // watch its path (not a single inode), and never hold the terminal process open for the watch.
+  const onSwitchChange = (): void => {
+    if (!tui) return;
+    if (switchIsOn()) void registerTui().catch(background);
+    else if (registration) unregister(registration, true);
+  };
+
+  function tuiAttach(event: TuiAttachEvent): void {
+    if (!tui) fs.watchFile(file, { persistent: false }, onSwitchChange);
+    tui = event;
+    if (registration) sendHello(registration);
+    else void registerTui().catch(background);
+  }
+
+  /** The session changed or a run started or ended: re-send the live hello. Registration and ownership are unchanged. */
+  function refreshHello(): void {
+    if (registration) sendHello(registration);
+  }
+
+  function stopTui(): void {
+    fs.unwatchFile(file, onSwitchChange);
+    tui = undefined;
+    if (registration) unregister(registration, true);
+  }
+
+  /** Turns remote access on at the unit, then registers this terminal as live if it runs one. */
+  async function enable(port: UnitPort): Promise<UnitStatus> {
+    const status = await port.call<UnitStatus>("enable");
+    await registerTui(port).catch(background);
+    return status;
+  }
 
   /** Opens the unit once per process and (re)configures it with the current account. */
   async function ready(a: Account): Promise<UnitPort> {
@@ -176,7 +345,7 @@ export function createConnect(o: ConnectOptions): Connect {
       if (password === null) return;
       await port.call("setPassword", { password });
     }
-    report(ctx, await port.call<UnitStatus>("enable"));
+    report(ctx, await enable(port));
   }
 
   async function dispatch(ctx: CommandContext, port: UnitPort, sub: string): Promise<void> {
@@ -188,7 +357,7 @@ export function createConnect(o: ConnectOptions): Connect {
       case "status": return report(ctx, s);
       case "on":
         if (!s.hasPassword) return first(ctx, port, s);
-        return report(ctx, await port.call<UnitStatus>("enable"));
+        return report(ctx, await enable(port));
       case "off": {
         const r = await port.call<UnitStatus & { serverNotified: boolean }>("disable");
         ctx.ui.notify(r.serverNotified ? "Remote access is off. The password and authorized browsers are kept; /connect on resumes." : "Remote access is off here, but the server could not be told; the console may still show this device online until it times out.", r.serverNotified ? "info" : "warning");
@@ -217,7 +386,7 @@ export function createConnect(o: ConnectOptions): Connect {
     async resume() {
       if (!switchIsOn()) return;
       const a = account();
-      if (a) await ready(a);
+      if (a) await registerTui(await ready(a));
     },
     async run(args, ctx) {
       const a = account();
@@ -228,14 +397,22 @@ export function createConnect(o: ConnectOptions): Connect {
         ctx.ui.notify(describe(e), "error");
       }
     },
+    tuiAttach,
+    refreshHello,
+    stopTui,
   };
 }
 
-export function registerConnectCommand(pi: ExtensionApi, o: ConnectOptions): Connect {
+export function registerConnectCommand(pi: ConnectExtensionApi, o: ConnectOptions): Connect {
   const connect = createConnect(o);
   pi.registerCommand("connect", {
     description: "remote access to this device from the CGS web console (on | off | forget | password | devices | unlock)",
     handler: (args, ctx) => connect.run(args, ctx),
   });
+  pi.on("tui_attach", (event) => connect.tuiAttach(event));
+  pi.on("session_shutdown", () => connect.stopTui());
+  pi.on("session_switch", () => connect.refreshHello());
+  pi.on("agent_start", () => connect.refreshHello());
+  pi.on("agent_end", () => connect.refreshHello());
   return connect;
 }

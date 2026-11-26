@@ -24,6 +24,7 @@ function fakeUnit(initial: UnitStatus, allowed = true) {
   const calls: { method: string; params: unknown }[] = [];
   let s = initial;
   const port: UnitPort = {
+    async attach() { throw new Error("unexpected live registration"); },
     async call<T>(method: string, params?: unknown): Promise<T> {
       calls.push({ method, params });
       switch (method) {
@@ -135,4 +136,42 @@ test("resume starts the unit only when the device switch was left on", async () 
 
 test("sessions inherit the extension and overlay flags of this process", () => {
   expect(inheritedArgs(["cgs", "--config", "/o.yml", "-e", "/x/index.ts", "--model", "m", "hello"])).toEqual(["--config", "/o.yml", "-e", "/x/index.ts"]);
+});
+
+test("a leased TUI is listed without standing by until a browser attaches", async () => {
+  const unit = fakeUnit(status({ hasPassword: true }));
+  const c = createConnect({ agentDir: agentDir(), openUnit: async () => unit.port, env: {} });
+  const lines: string[] = [];
+  const received: unknown[] = [];
+  let read!: (chunk: Uint8Array) => void;
+  let closed = 0;
+  let attached = 0;
+  let sessionPath: string | undefined;
+  unit.port.attach = async () => ({
+    start(onData) { read = onData; },
+    send(data) { lines.push(data.trimEnd()); return true; },
+    close() {},
+  });
+  c.tuiAttach({
+    session: () => ({ cwd: "/test", sessionPath }),
+    attach(send) {
+      attached++;
+      send('{"type":"ready"}');
+      return { receive(frame) { received.push(frame); }, close() { closed++; } };
+    },
+  });
+  expect(lines).toEqual([]);
+  await c.run("on", ui([]).ctx);
+  expect(JSON.parse(lines[0]!)).toMatchObject({ type: "live_hello", cwd: "/test" });
+  expect(attached).toBe(0);
+  sessionPath = "/sessions/a.jsonl";
+  c.refreshHello();
+  expect(JSON.parse(lines.at(-1)!)).toMatchObject({ sessionPath });
+  read(new TextEncoder().encode('{"type":"remote_attached"}\n>{"type":"pro'));
+  read(new TextEncoder().encode('mpt"}\n{"type":"remote_detached"}\n>{"type":"abort"}\n'));
+  expect(received).toEqual([{ type: "prompt" }]);
+  expect(attached).toBe(1);
+  expect(closed).toBe(1);
+  c.stopTui();
+  expect(closed).toBe(1);
 });

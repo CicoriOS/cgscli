@@ -1,0 +1,1508 @@
+From c267bb00061bf5abaa3e1ac264ae46cfca441115 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Fri, 27 Nov 2026 00:13:34 +0800
+Subject: [PATCH] P13: attach a remote to a live TUI session; the terminal
+ stands by and takes over on Esc
+
+Reason: A remote must see and drive a terminal session with the same frames a headless rpc-ui process speaks. The RPC dispatcher is wired to stdio and the process lifetime, and the TUI has no notion of an outside controller. The extension API reaches neither, so the dispatcher is factored (attachRpcMode), a `tui_attach` extension event hands the channel to the extension that serves it (cgsconnect), and the terminal gates its own keys and commands while a remote controls the session (ADR 0027).
+Upstream: none (CGS remote access)
+Remove-when: upstream offers a way for extensions to attach an RPC channel to an interactive session and to arbitrate control
+
+- rpc-mode.ts: runRpcMode's dispatcher is createRpcDispatcher; attachRpcMode runs it on a live session over a send callback, without owning the process; dialogs it shows are handed to the terminal's UI when the attachment closes
+- StandbyController: single control end, Esc takeover (1 press: takeover, 2: stop, 3: rewind), `taken_over` line sent first, default-deny command and key allowlists
+- InteractiveMode: `tui_attach` event after the extension hooks, red right-aligned hint, standby gate in the composer and global key paths and before a submission; ExtensionRunner.setUIContext swaps the UI extension dialogs use
+---
+ .../src/extensibility/extensions/runner.ts    |   8 +
+ .../src/extensibility/extensions/types.ts     |  36 +-
+ .../controllers/extension-ui-controller.ts    |   2 +-
+ .../src/modes/controllers/input-controller.ts |  23 +
+ .../modes/controllers/standby-controller.ts   | 187 +++++++
+ .../src/modes/interactive-mode.ts             |  53 ++
+ .../coding-agent/src/modes/rpc/rpc-mode.ts    | 467 +++++++++++-------
+ packages/coding-agent/src/modes/types.ts      |   3 +
+ .../test/daemon/cgsconnect-module.test.ts     |  46 +-
+ .../test/interactive-mode-rpc-attach.test.ts  | 154 ++++++
+ .../test/standby-controller.test.ts           |  90 ++++
+ 11 files changed, 891 insertions(+), 178 deletions(-)
+ create mode 100644 packages/coding-agent/src/modes/controllers/standby-controller.ts
+ create mode 100644 packages/coding-agent/test/interactive-mode-rpc-attach.test.ts
+ create mode 100644 packages/coding-agent/test/standby-controller.test.ts
+
+diff --git a/packages/coding-agent/src/extensibility/extensions/runner.ts b/packages/coding-agent/src/extensibility/extensions/runner.ts
+index 0e1c33a671..0ecd687d72 100644
+--- a/packages/coding-agent/src/extensibility/extensions/runner.ts
++++ b/packages/coding-agent/src/extensibility/extensions/runner.ts
+@@ -1195,6 +1195,14 @@ export class ExtensionRunner {
+ 		return this.#uiContext;
+ 	}
+ 
++	/**
++	 * Replaces the UI extension dialogs use: a remote client attached to a terminal session takes it (and gives it back
++	 * on takeover). `hasUI` is unchanged: a UI exists either way.
++	 */
++	setUIContext(uiContext: ExtensionUIContext): void {
++		this.#uiContext = uiContext;
++	}
++
+ 	hasUI(): boolean {
+ 		return this.#uiContext !== noOpUIContext;
+ 	}
+diff --git a/packages/coding-agent/src/extensibility/extensions/types.ts b/packages/coding-agent/src/extensibility/extensions/types.ts
+index 3d3d1a5b48..024ebe5368 100644
+--- a/packages/coding-agent/src/extensibility/extensions/types.ts
++++ b/packages/coding-agent/src/extensibility/extensions/types.ts
+@@ -1723,6 +1723,38 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
+ 	return event.toolName === toolName;
+ }
+ 
++/**
++ * TUI-only: fired once the local terminal owns the session (keybindings and UI hooks ready).
++ * `attach` opens the remote control channel; the TUI owns the returned handle and closes it on takeover.
++ * `session()` is read on demand (e.g. for a remote hello). It is not re-emitted per frame; extensions
++ * refresh their own copy from existing session events.
++ */
++export interface TuiAttachEvent {
++	type: "tui_attach";
++	/**
++	 * Opens the remote channel. `send` receives one complete RPC frame (a JSON line) per call; the line
++	 * `{"type":"taken_over"}` is sent last when the local TUI takes the session back.
++	 */
++	attach(send: (line: string) => void): TuiAttachHandle;
++	/** Current session snapshot. */
++	session(): TuiSessionSnapshot;
++}
++
++/** Session facts the remote side shows on attach. */
++export interface TuiSessionSnapshot {
++	cwd: string;
++	sessionPath?: string;
++	title?: string;
++	/** Thinking level of the session, when one is set. */
++	level?: string;
++}
++
++/** The channel `TuiAttachEvent.attach` returns. */
++export interface TuiAttachHandle {
++	receive(frame: unknown): void;
++	close(): void;
++}
++
+ /** Union of all event types */
+ export type ExtensionEvent =
+ 	| ResourcesDiscoverEvent
+@@ -1766,7 +1798,8 @@ export type ExtensionEvent =
+ 	| ToolApprovalResolvedEvent
+ 	| PlanReviewRequestedEvent
+ 	| PlanReviewResolvedEvent
+-	| ModeChangedEvent;
++	| ModeChangedEvent
++	| TuiAttachEvent;
+ 
+ // ============================================================================
+ // Event Results
+@@ -1975,6 +2008,7 @@ export interface ExtensionAPI {
+ 		handler: ExtensionHandler<SessionBeforeShutdownEvent, SessionBeforeShutdownResult>,
+ 	): void;
+ 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
++	on(event: "tui_attach", handler: ExtensionHandler<TuiAttachEvent>): void;
+ 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
+ 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
+ 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
+diff --git a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+index 67e8eabd40..e2107fa6d2 100644
+--- a/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/extension-ui-controller.ts
+@@ -313,7 +313,7 @@ export class ExtensionUiController {
+ 				confirmation.remainingPercent === undefined
+ 					? "inside the configured reserve margin"
+ 					: `${confirmation.remainingPercent.toFixed(1)}% remaining`;
+-			return this.showHookConfirm(
++			return enrichedUiContext.confirm(
+ 				"Coding-plan reserve reached",
+ 				`${confirmation.from} has ${reserve}. Switch to ${confirmation.to}? Choose No to keep using the current plan.`,
+ 				{ signal },
+diff --git a/packages/coding-agent/src/modes/controllers/input-controller.ts b/packages/coding-agent/src/modes/controllers/input-controller.ts
+index c75e54dd79..384da39360 100644
+--- a/packages/coding-agent/src/modes/controllers/input-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/input-controller.ts
+@@ -24,6 +24,7 @@ import type { DequeuedMessage, RestoredQueuedMessage } from "../../session/agent
+ import { USER_INTERRUPT_LABEL } from "../../session/messages";
+ import { cfgHideThinkingBlock } from "../../session/settings";
+ import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
++import { isStandbyAllowedCommandText, standbyAllowsKey } from "./standby-controller";
+ import { restoreDetachedDraft } from "../../slash-commands/helpers/draft";
+ import { parseSlashCommand, parseSubcommand } from "../../slash-commands/helpers/parse";
+ import { parseConfiguredThinkingLevel } from "../../thinking/levels";
+@@ -458,6 +459,7 @@ export class InputController {
+ 	 */
+ 	#onComposerKey(key: KeyEvent): boolean {
+ 		if (key.kind === "release") return false;
++		if (this.#standbyKey(key)) return true;
+ 		const km = this.ctx.keybindings;
+ 		const empty = this.ctx.composer.text().trim() === "";
+ 		// Left-arrow on an empty editor: the agent-hub double-tap gesture (in a focused subagent
+@@ -617,12 +619,31 @@ export class InputController {
+ 		return false;
+ 	}
+ 
++	/**
++	 * Standby gate (ADR 0027), default-deny: Esc is the takeover gesture; a key bound to an app action takes over
++	 * unless the action is on the local-display allowlist; typing and editing keys only change the local draft.
++	 * Returns true when the key was consumed. A key that takes over still runs its action afterwards.
++	 */
++	#standbyKey(key: KeyEvent): boolean {
++		const standby = this.ctx.standby;
++		if (!standby.active || key.kind === "release") return false;
++		const km = this.ctx.keybindings;
++		if (km.matches(key, "app.interrupt") && !this.ctx.composer.completing() && !this.#vimHoldsEscape()) {
++			return standby.escape();
++		}
++		const actions = Object.keys(km.resolvedBindings()).filter(action => action.startsWith("app."));
++		const bound = actions.some(action => km.matches(key, action as Keybinding));
++		if (bound && !standbyAllowsKey(action => km.matches(key, action as Keybinding))) standby.takeOver();
++		return false;
++	}
++
+ 	/**
+ 	 * App-wide shortcuts: keys nothing on the focus path took (the composer's own bindings run
+ 	 * first while it has focus). They act on the main transcript and editor, so an overlay that
+ 	 * covers them defers them.
+ 	 */
+ 	#onGlobalKey(key: KeyEvent): boolean {
++		if (this.#standbyKey(key)) return true;
+ 		if (key.kind === "release") return false;
+ 		const km = this.ctx.keybindings;
+ 		if (key.id === "ctrl+shift+d") {
+@@ -2412,6 +2433,8 @@ export class InputController {
+ 
+ 	/** Track an Enter submission from the moment it is taken until its dispatch ends. */
+ 	async #trackSubmission(text: string, dispatch: (text: string) => Promise<void>): Promise<void> {
++		// While a remote client controls the session, only read-only commands stay local; anything else takes over first.
++		if (this.ctx.standby.active && !isStandbyAllowedCommandText(text)) this.ctx.standby.takeOver();
+ 		const done = Promise.withResolvers<void>();
+ 		this.#submissionDispatches.add(done.promise);
+ 		try {
+diff --git a/packages/coding-agent/src/modes/controllers/standby-controller.ts b/packages/coding-agent/src/modes/controllers/standby-controller.ts
+new file mode 100644
+index 0000000000..1b7de04627
+--- /dev/null
++++ b/packages/coding-agent/src/modes/controllers/standby-controller.ts
+@@ -0,0 +1,187 @@
++/**
++ * Standby and takeover for a terminal session that a remote client is attached to (ADR 0027).
++ *
++ * While standing by, the local TUI keeps showing the running task and draft, but it is not the
++ * controlling end: only the allowlisted read-only commands and local-display keys run locally.
++ * Everything else takes over: the remote channel is revoked, the `taken_over` sentinel is sent
++ * on it, and it is closed. Policies are default-deny, so a command or key action added later
++ * takes over until someone allowlists it here.
++ */
++import type { TuiAttachHandle } from "../../extensibility/extensions/types";
++
++/** The frame sent on the remote channel right before the local TUI revokes it. */
++export const TAKEN_OVER_FRAME = { type: "taken_over" } as const;
++
++/**
++ * Grace after an Esc press during which another press extends the sequence (single, double, triple).
++ * [unverified V18]: the window matches the empty-draft double-Esc window; V18 must measure it.
++ */
++export const STANDBY_ESC_WINDOW_MS = 500;
++
++type ArgsPredicate = (args: string) => boolean;
++
++/**
++ * Slash commands that stay local while standing by, keyed by command name. A predicate decides
++ * per argument form: `/usage reset` and `/jobs kill` mutate and take over.
++ */
++const STANDBY_ALLOWED_COMMANDS: Record<string, ArgsPredicate> = {
++	changelog: () => true,
++	hotkeys: () => true,
++	usage: args => args === "" || args === "show",
++	jobs: args => args === "" || args === "full",
++};
++
++/**
++ * Keybinding actions that only change local display, scroll, or clipboard state. Anything else
++ * takes over.
++ */
++export const STANDBY_ALLOWED_KEY_ACTIONS: Record<string, true> = {
++	"app.tools.expand": true,
++	"app.tools.toggleVisibility": true,
++	"app.thinking.toggle": true,
++	"app.clipboard.copyLine": true,
++	"app.clipboard.copyPrompt": true,
++	"app.links.hint": true,
++	"app.display.reset": true,
++	"tui.select.pageUp": true,
++	"tui.select.pageDown": true,
++};
++
++export type StandbyEscAction = "takeover" | "stop" | "rewind";
++
++/** Esc semantics on standby: one press takes over, two also stop the task, three also rewind. */
++export function standbyEscAction(presses: number): StandbyEscAction {
++	if (presses >= 3) return "rewind";
++	if (presses === 2) return "stop";
++	return "takeover";
++}
++
++/** Whether a slash command, given its name and the raw argument text, runs locally while standing by. */
++export function isStandbyAllowedCommand(name: string, args: string): boolean {
++	if (!Object.hasOwn(STANDBY_ALLOWED_COMMANDS, name)) return false;
++	return STANDBY_ALLOWED_COMMANDS[name]!(args.trim());
++}
++
++/** Whether a draft is a slash command that runs locally while standing by. */
++export function isStandbyAllowedCommandText(text: string): boolean {
++	const trimmed = text.trim();
++	if (!trimmed.startsWith("/")) return false;
++	const body = trimmed.slice(1);
++	const space = body.search(/\s/);
++	const name = space === -1 ? body : body.slice(0, space);
++	const args = space === -1 ? "" : body.slice(space + 1);
++	return isStandbyAllowedCommand(name, args);
++}
++
++/** Whether a set of keybinding matches includes an allowlisted local action. */
++export function standbyAllowsKey(matches: (action: string) => boolean): boolean {
++	for (const action of Object.keys(STANDBY_ALLOWED_KEY_ACTIONS)) {
++		if (matches(action)) return true;
++	}
++	return false;
++}
++
++export interface StandbyControllerOptions {
++	/**
++	 * Opens the agent-side channel for the remote client, given its send callback. The controller
++	 * owns the returned handle while the remote client is attached.
++	 */
++	open(send: (line: string) => void): TuiAttachHandle;
++	/** Runs after an Esc sequence resolves: the mode performs the stop or rewind (takeover already done). */
++	onEscAction(action: Exclude<StandbyEscAction, "takeover">): void;
++	/** Called after standby begins or ends for any reason (takeover, remote close). */
++	onChange?(): void;
++	/** Delay before a single or double press acts, so a longer sequence can extend it. */
++	escWindowMs?: number;
++}
++
++/** Owns the remote channel while the session is in standby. Does not render anything. */
++export class StandbyController {
++	readonly #options: StandbyControllerOptions;
++	#handle: TuiAttachHandle | undefined;
++	#send: ((line: string) => void) | undefined;
++	#presses = 0;
++	#timer: NodeJS.Timeout | undefined;
++
++	constructor(options: StandbyControllerOptions) {
++		this.#options = options;
++	}
++
++	/** Whether a remote client currently owns the controls. */
++	get active(): boolean {
++		return this.#handle !== undefined;
++	}
++
++	/**
++	 * Binds a remote client, handed out through the `tui_attach` event. A second attach while one is
++	 * active is refused: the single control end is the first client.
++	 */
++	attach(send: (line: string) => void): TuiAttachHandle {
++		if (this.#handle) throw new Error("A remote client already controls this session.");
++		const handle = this.#options.open(send);
++		this.#handle = handle;
++		this.#send = send;
++		this.#options.onChange?.();
++		return {
++			receive: frame => {
++				if (this.#handle === handle) handle.receive(frame);
++			},
++			close: () => this.#release(handle, false),
++		};
++	}
++
++	/**
++	 * Revokes ownership, sends the `taken_over` sentinel, then closes the channel. Ownership is
++	 * removed first so no frame can arrive after the sentinel.
++	 */
++	takeOver(): void {
++		const handle = this.#handle;
++		if (!handle) return;
++		this.#release(handle, true);
++	}
++
++	/**
++	 * Handles an Esc press while standing by. Returns true when the press was consumed. Single and
++	 * double presses resolve after the window; the third resolves immediately.
++	 */
++	escape(): boolean {
++		if (!this.active) return false;
++		this.#presses += 1;
++		clearTimeout(this.#timer);
++		if (this.#presses >= 3) {
++			this.#resolveEsc();
++			return true;
++		}
++		this.#timer = setTimeout(() => this.#resolveEsc(), this.#options.escWindowMs ?? STANDBY_ESC_WINDOW_MS);
++		return true;
++	}
++
++	#resolveEsc(): void {
++		const presses = this.#presses;
++		this.#presses = 0;
++		this.#timer = undefined;
++		const action = standbyEscAction(presses);
++		this.takeOver();
++		if (action !== "takeover") this.#options.onEscAction(action);
++	}
++
++	#release(handle: TuiAttachHandle, sendTakenOver: boolean): void {
++		if (this.#handle !== handle) return;
++		const send = this.#send;
++		this.#handle = undefined;
++		this.#send = undefined;
++		clearTimeout(this.#timer);
++		this.#timer = undefined;
++		this.#presses = 0;
++		if (sendTakenOver) send?.(JSON.stringify(TAKEN_OVER_FRAME));
++		handle.close();
++		this.#options.onChange?.();
++	}
++
++	/** Releases timers and the channel without a sentinel (session shutdown). */
++	dispose(): void {
++		const handle = this.#handle;
++		if (!handle) return;
++		this.#release(handle, false);
++	}
++}
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 5519751a25..344726c9b3 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -223,6 +223,8 @@ import { CommandController } from "./controllers/command-controller";
+ import { EventController } from "./controllers/event-controller";
+ import { ExtensionUiController } from "./controllers/extension-ui-controller";
+ import { InputController } from "./controllers/input-controller";
++import { StandbyController } from "./controllers/standby-controller";
++import { attachRpcMode } from "./rpc/rpc-mode";
+ import { LiveCommandController } from "./controllers/live-command-controller";
+ import { MCPCommandController } from "./controllers/mcp-command-controller";
+ import { OmfgController } from "./controllers/omfg-controller";
+@@ -393,6 +395,7 @@ import {
+ 	signal,
+ 	untrack,
+ } from "@oh-my-pi/pi-tui";
++import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
+ 
+ import { insideMultiplexer } from "@oh-my-pi/pi-tui/driver/mux/detect";
+ import { setLinkSchemes } from "@oh-my-pi/pi-tui/term/painters/md";
+@@ -1052,6 +1055,31 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	optimisticSkillMessagePending = false;
+ 	lastSigintTime = 0;
+ 	lastEscapeTime = 0;
++	/**
++	 * A remote client attached to this terminal session (ADR 0027). While one controls it the TUI stands by: the task keeps
++	 * running here, local actions that change the session take over first. The RPC dispatcher serves the remote with the
++	 * same frames a headless `--mode rpc-ui` process speaks.
++	 */
++	readonly standby: StandbyController = new StandbyController({
++		open: send => {
++			const localUI = this.getToolUIContext();
++			if (!localUI) throw new Error("The terminal UI is not ready for a remote client.");
++			return attachRpcMode(this.session, send, {
++				localUI,
++				setToolUIContext: (ui, hasUI) => {
++					this.setToolUIContext(ui, hasUI);
++					this.session.extensionRunner?.setUIContext(ui);
++				},
++				subagentEventBus: this.#subagentEventBus,
++				mcpManager: this.mcpManager,
++			});
++		},
++		onEscAction: action => {
++			if (action === "stop") this.#inputController.handleInterrupt();
++			else this.showUserMessageSelector();
++		},
++		onChange: () => this.#syncStandbyHint(),
++	});
+ 	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
+ 	mcpTestEscapeHandlers = new Set<() => void>();
+ 	lastLeftTapTime = 0;
+@@ -2245,6 +2273,18 @@ export class InteractiveMode implements InteractiveModeContext {
+ 
+ 		// Initialize hooks with TUI-based UI context
+ 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
++		// A remote client may now attach to this terminal session: the extension that serves it (cgsconnect) asks for the
++		// channel with `attach` and owns the frames; the TUI owns standby and takeover.
++		void this.session.extensionRunner?.emit({
++			type: "tui_attach",
++			attach: send => this.standby.attach(send),
++			session: () => ({
++				cwd: this.sessionManager.getCwd(),
++				sessionPath: this.sessionManager.getSessionFile(),
++				title: this.sessionManager.getSessionName(),
++				level: this.session.thinkingLevel,
++			}),
++		});
+ 		// A live `disabledExtensions` edit suspends or resumes extensions: drop (or restore) their link
+ 		// schemes and renderers from the transcript.
+ 		const extensionRunner = this.session.extensionRunner;
+@@ -6836,6 +6876,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 	}
+ 
+ 	stop(): void {
++		this.standby.dispose();
+ 		this.#frame.releaseStartupKeys();
+ 		this.#closeAttempt?.abort();
+ 		this.syncIdleMaintenanceView(null);
+@@ -7212,6 +7253,18 @@ export class InteractiveMode implements InteractiveModeContext {
+ 		await this.shutdown({ cancellable: false });
+ 	}
+ 
++	/** The standby hint (ADR 0027): shown above the editor, right-aligned, while a remote client controls the session. */
++	#syncStandbyHint(): void {
++		const key = "cgs-standby";
++		if (!this.standby.active) {
++			this.hud.widgets.set(key, undefined, "aboveEditor");
++			return;
++		}
++		const text = "CGSConnected, standing by. Press Esc to take over.";
++		const pad = Math.max(0, this.shell.size().columns - visibleWidth(text) - 4);
++		this.hud.widgets.set(key, [" ".repeat(pad) + currentTheme().fg("error", text)], "aboveEditor");
++	}
++
+ 	// Extension UI integration
+ 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
+ 		this.#toolUiContextSetter(uiContext, hasUI);
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+index 403058b9cf..c325c4531b 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -209,6 +209,8 @@ export class RpcWordPredictor {
+ // Re-export types for consumers
+ export type * from "./rpc-types";
+ 
++const rpcDialogHandedOff = new Error("RPC dialog handed off to the terminal");
++
+ export type PendingExtensionRequest = {
+ 	resolve: (response: RpcExtensionUIResponse) => void;
+ 	reject: (error: Error) => void;
+@@ -228,12 +230,14 @@ export class RpcPendingExtensionRequests extends Map<string, PendingExtensionReq
+ 
+ 	/** Reject every active and future extension UI request. */
+ 	rejectAll(message: string): void {
+-		if (!this.#closedError) this.#closedError = new Error(message);
++		this.close(new Error(message));
++	}
++
++	close(error: Error): void {
++		this.#closedError ??= error;
+ 		const requests = Array.from(this.values());
+ 		this.clear();
+-		for (const request of requests) {
+-			request.reject(this.#closedError);
+-		}
++		for (const request of requests) request.reject(this.#closedError);
+ 	}
+ }
+ 
+@@ -1496,7 +1500,10 @@ export function requestRpcDialog<T>(
+ 				reject(err);
+ 			}
+ 		},
+-		reject,
++		reject: error => {
++			cleanup();
++			reject(error);
++		},
+ 	});
+ 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
+ 	return promise;
+@@ -1535,17 +1542,18 @@ export function registerRpcPersistenceSurface(
+ 	session: Pick<AgentSession, "sessionManager">,
+ 	output: (frame: object) => void,
+ 	onFailure?: (error: Error) => void,
++	mirrorToStderr = true,
+ ): () => void {
+ 	const unsubscribeFailures = session.sessionManager.onPersistenceError(error => {
+ 		onFailure?.(error);
+ 		const message = formatPersistenceFailure(error.message);
+ 		output({ type: "notice", level: "error", message, source: "session-persistence" });
+-		process.stderr.write(`${message}\n`);
++		if (mirrorToStderr) process.stderr.write(`${message}\n`);
+ 	});
+ 	const unsubscribeNotices = session.sessionManager.onPersistenceNotice(notice => {
+ 		const message = formatPersistenceNotice(notice);
+ 		output({ type: "notice", level: "warning", message, source: "session-persistence" });
+-		process.stderr.write(`${message}\n`);
++		if (mirrorToStderr) process.stderr.write(`${message}\n`);
+ 	});
+ 	return () => {
+ 		unsubscribeFailures();
+@@ -1574,50 +1582,71 @@ export interface RpcModeOptions {
+  * Listens for JSON commands on stdin, outputs events and responses on stdout.
+  */
+ export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+-	const modelPicker = new RpcModelPicker(session);
+-	const {
+-		setToolUIContext,
+-		headless = false,
+-		subagentEventBus,
+-		input = claimRpcInput(),
+-		createLiveSession,
+-		createDictationController,
+-	} = options;
+-	// Signal to RPC clients that the server is ready to accept commands
++	const { input = claimRpcInput() } = options;
+ 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
+ 	// process.stdout with no newline, which the reader merges with the next JSON line and
+ 	// breaks JSON.parse. In RPC mode stdout is the JSON protocol channel — nothing else
+ 	// may write there.
+ 	process.env.PI_NOTIFICATIONS = "off";
+ 
+-	const frameEncoder = new RpcFrameEncoder();
+ 	// Bun on Windows writes a piped process.stdout with a blocking WriteFile on the
+ 	// JS thread and never reports backpressure, so a client that stops reading
+ 	// stdout froze the whole worker, stdin reader included. An fd write stream
+ 	// writes from the threadpool and reports backpressure, letting the writer spool.
+ 	const stdout = process.platform === "win32" ? fs.createWriteStream("", { fd: 1, autoClose: false }) : process.stdout;
+-	// The writer can fail before the bridge is constructed.
+-	let dictationBridge: RpcDictationBridge | undefined = undefined;
++	let stopDictation: (() => void) | undefined;
+ 	const outputWriter = new RpcOutputWriter(stdout, failure => {
+ 		logger.error("RPC output delivery failed", { error: String(failure) });
+-		dictationBridge?.dispose();
++		stopDictation?.();
+ 		void session
+ 			.dispose()
+ 			.finally(() => disposeLocalMcpHost())
+ 			.finally(() => process.exit(1));
+ 	});
+-	outputWriter.write(
+-		frameEncoder.encodeFrames({
+-			type: "ready",
+-			protocolVersion: 1,
+-			supportedProtocolVersions: [1, 2],
+-			maxFrameBytes: MAX_RPC_FRAME_BYTES,
+-			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
+-			supportsBashExcludeFromContext: true,
+-		}),
++	const dispatcher = createRpcDispatcher(session, options, frames => outputWriter.write(frames));
++	stopDictation = dispatcher.disposeDictation;
++	return dispatcher.runStdio(input, outputWriter);
++}
++
++export interface RpcAttachOptions extends Pick<RpcModeOptions, "subagentEventBus" | "mcpManager"> {
++	localUI: ExtensionUIContext;
++	setToolUIContext: NonNullable<RpcModeOptions["setToolUIContext"]>;
++	scheduledTurn?: () => boolean;
++}
++
++/** Drive a live terminal session without initializing extensions again or owning the process. */
++export function attachRpcMode(session: AgentSession, send: (line: string) => void, options: RpcAttachOptions) {
++	const { receive, close } = createRpcDispatcher(
++		session,
++		options,
++		lines => {
++			for (const line of lines) send(line);
++		},
++		options,
+ 	);
+-	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
+-		outputWriter.write(frameEncoder.encodeFrames(obj));
++	return { receive, close };
++}
++
++function createRpcDispatcher(
++	session: AgentSession,
++	options: RpcModeOptions,
++	writeFrames: (lines: Iterable<string>) => void,
++	attach?: RpcAttachOptions,
++) {
++	const modelPicker = new RpcModelPicker(session);
++	const localUI = attach?.localUI;
++	const {
++		setToolUIContext,
++		headless = false,
++		subagentEventBus,
++		createLiveSession,
++		createDictationController,
++	} = options;
++	const frameEncoder = new RpcFrameEncoder();
++	let closed = false;
++	const output: RpcOutput = obj => {
++		if (closed) return;
++		writeFrames(frameEncoder.encodeFrames(obj));
+ 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
+ 			frameEncoder.setProtocolVersion(2);
+ 	};
+@@ -1646,7 +1675,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	// A scheduled or held goal turn will start a turn: every settle report treats it as busy,
+ 	// and any report of "not settled" for that reason is later closed by `session_settled`.
+ 	const goalTurnScheduled = watchedScheduledTurnProbe(
+-		() => goalController.continuationPending,
++		() => goalController.continuationPending || attach?.scheduledTurn?.() === true,
+ 		() => settleWatcher,
+ 	);
+ 	const settleWatcher = new RpcSessionSettleWatcher(session, output, goalTurnScheduled);
+@@ -1658,11 +1687,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 
+ 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
+ 	const hostToolBridge = new RpcHostToolBridge(output);
++	let registeredHostTools = false;
+ 	const hostUriBridge = new RpcHostUriBridge(output);
+ 	// Live frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
+ 	const liveBridge = new RpcLiveBridge(session, output, createLiveSession);
+ 	let lastDictationError: { message: string } | undefined;
+-	const sessionDictationBridge = new RpcDictationBridge(
++	const dictationBridge = new RpcDictationBridge(
+ 		session,
+ 		frame => {
+ 			output(frame);
+@@ -1670,15 +1700,14 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 		},
+ 		createDictationController,
+ 	);
+-	dictationBridge = sessionDictationBridge;
+ 	const stopDictationForSessionChange = async (): Promise<void> => {
+ 		const previousError = lastDictationError;
+ 		try {
+-			await sessionDictationBridge.stop();
++			await dictationBridge.stop();
+ 		} catch (cause) {
+ 			// Only a reported transcription failure after cleanup may leave the change proceeding.
+ 			if (
+-				sessionDictationBridge.active ||
++				dictationBridge.active ||
+ 				!lastDictationError ||
+ 				lastDictationError === previousError ||
+ 				!(cause instanceof Error) ||
+@@ -1715,20 +1744,52 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			private output: (obj: RpcResponse | RpcExtensionUIRequest | object) => void,
+ 		) {}
+ 
++		#routeDialog<T>(
++			options: ExtensionUIDialogOptions | undefined,
++			remote: () => Promise<T>,
++			local: (ui: ExtensionUIContext, options: ExtensionUIDialogOptions | undefined) => Promise<T>,
++		): Promise<T> {
++			if (!localUI) return remote();
++			if (closed) return local(localUI, options);
++			const deadline = options?.timeout !== undefined ? performance.now() + options.timeout : undefined;
++			return remote().catch(error => {
++				if (error !== rpcDialogHandedOff) throw error;
++				return local(
++					localUI,
++					deadline === undefined
++						? options
++						: {
++								...options,
++								timeout: Math.max(0, deadline - performance.now()),
++							},
++				);
++			});
++		}
++
+ 		get askDialog(): ExtensionUIContext["askDialog"] {
++			if (closed && localUI) return localUI.askDialog?.bind(localUI);
+ 			if (!this.askDialogEnabled) return undefined;
+ 			return (questions, dialogOptions) =>
+-				requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions);
++				this.#routeDialog(
++					dialogOptions,
++					() => requestRpcAskDialog(this.pendingRequests, this.output, questions, dialogOptions),
++					(ui, opts) => ui.askDialog?.(questions, opts) ?? Promise.resolve(undefined),
++				);
+ 		}
+ 
+ 		get formDialog(): ExtensionUIContext["formDialog"] {
+ 			return (html, dialogOptions) =>
+-				requestRpcFormDialog(
+-					this.pendingRequests,
+-					this.output,
+-					frameEncoder.maxIntactFrameBytes,
+-					html,
++				this.#routeDialog(
+ 					dialogOptions,
++					() =>
++						requestRpcFormDialog(
++							this.pendingRequests,
++							this.output,
++							frameEncoder.maxIntactFrameBytes,
++							html,
++							dialogOptions,
++						),
++					(ui, opts) => ui.formDialog?.(html, opts) ?? Promise.resolve(undefined),
+ 				);
+ 		}
+ 
+@@ -1737,24 +1798,33 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			options: ExtensionUISelectItem[],
+ 			dialogOptions?: ExtensionUIDialogOptions,
+ 		): Promise<string | undefined> {
+-			return requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions);
++			return this.#routeDialog(
++				dialogOptions,
++				() => requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions),
++				(ui, opts) => ui.select(title, options, opts),
++			);
+ 		}
+ 
+ 		confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
+-			return requestRpcDialog(
+-				this.pendingRequests,
+-				this.output,
++			return this.#routeDialog(
+ 				dialogOptions,
+-				false,
+-				{ method: "confirm", title, message, timeout: dialogOptions?.timeout },
+-				response => {
+-					if ("cancelled" in response && response.cancelled) {
+-						if (response.timedOut) dialogOptions?.onTimeout?.();
+-						return false;
+-					}
+-					if ("confirmed" in response) return response.confirmed;
+-					return false;
+-				},
++				() =>
++					requestRpcDialog(
++						this.pendingRequests,
++						this.output,
++						dialogOptions,
++						false,
++						{ method: "confirm", title, message, timeout: dialogOptions?.timeout },
++						response => {
++							if ("cancelled" in response && response.cancelled) {
++								if (response.timedOut) dialogOptions?.onTimeout?.();
++								return false;
++							}
++							if ("confirmed" in response) return response.confirmed;
++							return false;
++						},
++					),
++				(ui, opts) => ui.confirm(title, message, opts),
+ 			);
+ 		}
+ 
+@@ -1763,7 +1833,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			placeholder?: string,
+ 			dialogOptions?: ExtensionUIDialogOptions,
+ 		): Promise<string | undefined> {
+-			return requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions);
++			return this.#routeDialog(
++				dialogOptions,
++				() => requestRpcInput(this.pendingRequests, this.output, title, placeholder, dialogOptions),
++				(ui, opts) => ui.input(title, placeholder, opts),
++			);
+ 		}
+ 
+ 		onTerminalInput(): () => void {
+@@ -1875,7 +1949,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			dialogOptions?: ExtensionUIDialogOptions,
+ 			editorOptions?: { promptStyle?: boolean },
+ 		): Promise<string | undefined> {
+-			return requestRpcEditor(this.pendingRequests, this.output, title, prefill, dialogOptions, editorOptions);
++			return this.#routeDialog(
++				dialogOptions,
++				() => requestRpcEditor(this.pendingRequests, this.output, title, prefill, dialogOptions, editorOptions),
++				(ui, opts) => ui.editor(title, prefill, opts, editorOptions),
++			);
+ 		}
+ 
+ 		addAutocompleteProvider(): void {
+@@ -1914,6 +1992,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	// correct waiting promise regardless of which code path created the request.
+ 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
+ 	setToolUIContext?.(rpcUiContext, true);
++	const announceReady = () =>
++		output({
++			type: "ready",
++			protocolVersion: 1,
++			supportedProtocolVersions: [1, 2],
++			maxFrameBytes: MAX_RPC_FRAME_BYTES,
++			maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
++			supportsBashExcludeFromContext: true,
++		});
+ 	const setAskDialog = (command: RpcCommand & { type: "set_ask_dialog" }): RpcResponse => {
+ 		rpcUiContext.askDialogEnabled = command.enabled === true;
+ 		return success(command.id, "set_ask_dialog", { enabled: rpcUiContext.askDialogEnabled });
+@@ -1926,6 +2013,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	// other frame is held, in arrival order, for that loop.
+ 	let heldFrames: unknown[] | undefined = [];
+ 	const receiveFrame = (parsed: unknown): void => {
++		if (closed) return;
+ 		if (!heldFrames) {
+ 			inputDispatcher.dispatch(parsed);
+ 		} else if (isRpcExtensionUIResponse(parsed)) {
+@@ -1936,81 +2024,86 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			heldFrames.push(parsed);
+ 		}
+ 	};
+-	// A transport error during startup must not be an unhandled rejection; the final await below still throws it.
+-	// Input ending while startup still runs means no client is left to answer a dialog it awaits: reject them.
+-	const inputRead = readRpcInputFrames(input, receiveFrame, message => output(error(undefined, "parse", message)));
+-	const rejectStartupDialogs = (): void => {
+-		if (heldFrames) pendingExtensionRequests.rejectAll("RPC client disconnected during startup");
+-	};
+-	inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
+-
+-	// Set up extensions with RPC-based UI context
+-	await initializeExtensions(session, {
+-		mode: "rpc",
+-		// Extension-initiated session changes get the same goal quiesce/reattach as the commands below.
+-		wrapSessionChange: <T extends { cancelled: boolean }>(
+-			change: () => Promise<T>,
+-			{ detachesRun }: { detachesRun: boolean },
+-		): Promise<T> =>
+-			withSessionChange(async () => {
+-				await stopDictationForSessionChange();
+-				await btw.close();
+-				await goalController.beginSessionChange();
+-				let result: T | undefined;
+-				try {
+-					result = await change();
+-					return result;
+-				} finally {
+-					// Reattaches only if the session actually changed, then re-checks settlement.
+-					// A change that throws may already have detached the run: count it as detached.
+-					await goalController.endSessionChange({ detachedRun: detachesRun && result?.cancelled !== true });
+-					if (result && !result.cancelled) {
+-						// As for the host's new/switch commands: a detached run never yields, so
+-						// close the prompts it was answering. Branch and navigation leave a live
+-						// run streaming to its normal yield.
+-						if (detachesRun) promptResults.abortOpen();
+-						void settleWatcher.check();
++	const startStdio = async (input: ReadableStream<Uint8Array>) => {
++		announceReady();
++		// A transport error during startup must not be an unhandled rejection; the final await below still throws it.
++		// Input ending while startup still runs means no client is left to answer a dialog it awaits: reject them.
++		const inputRead = readRpcInputFrames(input, receiveFrame, message => output(error(undefined, "parse", message)));
++		const rejectStartupDialogs = (): void => {
++			if (heldFrames) pendingExtensionRequests.rejectAll("RPC client disconnected during startup");
++		};
++		inputRead.then(rejectStartupDialogs, rejectStartupDialogs);
++
++		// Set up extensions with RPC-based UI context
++		await initializeExtensions(session, {
++			mode: "rpc",
++			// Extension-initiated session changes get the same goal quiesce/reattach as the commands below.
++			wrapSessionChange: <T extends { cancelled: boolean }>(
++				change: () => Promise<T>,
++				{ detachesRun }: { detachesRun: boolean },
++			): Promise<T> =>
++				withSessionChange(async () => {
++					await stopDictationForSessionChange();
++					await btw.close();
++					await goalController.beginSessionChange();
++					let result: T | undefined;
++					try {
++						result = await change();
++						return result;
++					} finally {
++						// Reattaches only if the session actually changed, then re-checks settlement.
++						// A change that throws may already have detached the run: count it as detached.
++						await goalController.endSessionChange({ detachedRun: detachesRun && result?.cancelled !== true });
++						if (result && !result.cancelled) {
++							// As for the host's new/switch commands: a detached run never yields, so
++							// close the prompts it was answering. Branch and navigation leave a live
++							// run streaming to its normal yield.
++							if (detachesRun) promptResults.abortOpen();
++							void settleWatcher.check();
++						}
+ 					}
+-				}
+-			}),
+-		reportSendError: (action, err) => {
+-			output(error(undefined, action, err.message));
+-		},
+-		reportRuntimeError: err => {
+-			output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
+-		},
+-		onShutdown: () => {
+-			shutdownState.requested = true;
+-			dictationBridge.dispose();
+-		},
+-		trackAgentInvokingMessage: task => {
+-			extensionUserMessageTracker.trackAgentMessageTask(task);
+-		},
+-		// Headless hosts get the extension runner's no-op UI: hasUI=false, dialogs resolve to defaults.
+-		uiContext: headless ? undefined : rpcUiContext,
+-	});
++				}),
++			reportSendError: (action, err) => {
++				output(error(undefined, action, err.message));
++			},
++			reportRuntimeError: err => {
++				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
++			},
++			onShutdown: () => {
++				shutdownState.requested = true;
++				dictationBridge.dispose();
++			},
++			trackAgentInvokingMessage: task => {
++				extensionUserMessageTracker.trackAgentMessageTask(task);
++			},
++			// Headless hosts get the extension runner's no-op UI: hasUI=false, dialogs resolve to defaults.
++			uiContext: headless ? undefined : rpcUiContext,
++		});
++		return { inputRead };
++	};
+ 
+ 	// Output all agent events as JSON; prompt results follow the frame that settled them.
+-	session.subscribe(event => {
+-		sessionEvents.forward(event);
+-		// Before the prompt-result and settle reports: a goal continuation decided at this
+-		// agent_end is scheduled (and reported as pending) before either reads settlement.
+-		goalController.observe(event);
+-		promptResults.observe(event);
+-		settleWatcher.observe(event);
+-	});
+-	await goalController.reconcile();
+-	await goalController.settled();
+-
+-	// Discriminates a store failure from any other dispose rejection below.
++	const subscribeEvents = () =>
++		session.subscribe(event => {
++			sessionEvents.forward(event);
++			// Before the prompt-result and settle reports: a goal continuation decided at this
++			// agent_end is scheduled (and reported as pending) before either reads settlement.
++			if (!localUI) goalController.observe(event);
++			promptResults.observe(event);
++			settleWatcher.observe(event);
++		});
++	let unsubscribeEvents: (() => void) | undefined;
+ 	let persistenceFailure: Error | undefined;
+-	registerRpcPersistenceSurface(
+-		session,
+-		frame => output(frame),
+-		error => {
+-			persistenceFailure = error;
+-		},
+-	);
++	const subscribePersistence = () =>
++		registerRpcPersistenceSurface(
++			session,
++			output,
++			error => {
++				persistenceFailure = error;
++			},
++			!localUI,
++		);
++	let unsubscribePersistence: (() => void) | undefined;
+ 
+ 	/**
+ 	 * Dispose the session, then end the process. A store failure still latched
+@@ -2020,7 +2113,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	 * loss is mirrored on stderr and the exit code is nonzero. A dispose
+ 	 * rejection with no latched store failure still surfaces to the caller.
+ 	 */
+-	const disposeAndExit = async (): Promise<never> => {
++	const disposeAndExit = async (outputWriter: RpcOutputWriter): Promise<never> => {
+ 		try {
+ 			// The process ends regardless; report an unsaved side answer instead of skipping dispose.
+ 			await btw.close().catch(btwError => {
+@@ -2079,10 +2172,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	const emitAvailableCommandsUpdate = async () => {
+ 		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+ 	};
+-	session.subscribeCommandMetadataChanged(() => {
+-		void emitAvailableCommandsUpdate();
+-	});
+-	await emitAvailableCommandsUpdate();
++	const subscribeMetadata = () =>
++		session.subscribeCommandMetadataChanged(() => {
++			void emitAvailableCommandsUpdate();
++		});
++	let unsubscribeMetadata: (() => void) | undefined;
+ 
+ 	const inputGate = new RpcUserInputGate();
+ 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
+@@ -2599,6 +2693,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			case "set_host_tools": {
+ 				const tools = normalizeHostToolDefinitions(command.tools);
+ 				const rpcTools = hostToolBridge.setTools(tools);
++				registeredHostTools ||= rpcTools.length > 0;
+ 				await session.refreshRpcHostTools(rpcTools);
+ 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
+ 			}
+@@ -3148,10 +3243,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 	};
+ 
+ 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
++		if (closed) return error(command.id, command.type, "RPC attachment is closed");
+ 		if (!Object.hasOwn(SESSION_CHANGE_TYPES, command.type)) return handleCommandImpl(command);
+ 		return withSessionChange(() => handleCommandImpl(command));
+ 	};
+ 
++	let stdioWriter: RpcOutputWriter | undefined;
++
+ 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
+ 	// process while a background-dispatched bash still owes the client its
+ 	// response frame. The coordinator drains tracked tasks before exiting and
+@@ -3164,7 +3262,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 			// the process exits. dispose() also emits `session_shutdown`, so we
+ 			// must NOT emit it separately here or the event fires twice. Skipping
+ 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
+-			await disposeAndExit();
++			if (stdioWriter) await disposeAndExit(stdioWriter);
+ 		},
+ 	});
+ 
+@@ -3185,35 +3283,70 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions
+ 		acceptInput: command => inputGate.accept(command),
+ 	});
+ 
+-	// Startup is over: run the frames held back meanwhile, then every later frame, through the dispatcher.
+-	// Side-channel frames dispatch immediately, ordinary commands serialize through inputDispatcher, and bash
+-	// remains background-dispatched so abort_bash can overtake it. readRpcInputFrames reads line-by-line so a
+-	// single malformed line is reported as an error frame and the loop keeps running instead of throwing out of
+-	// the reader and killing the whole process (issue #5194).
+-	const held = heldFrames;
+-	heldFrames = undefined;
+-	for (const parsed of held) inputDispatcher.dispatch(parsed);
+-	await inputRead;
+-
+-	// stdin closed — RPC client is gone. Fail pending side-channel requests
+-	// first so active/queued commands can settle, then drain accepted work.
+-	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
+-	hostToolBridge.close("RPC client disconnected before host tool execution completed");
+-	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+-	dictationBridge.dispose();
+-	await liveBridge.stop();
+-	await inputDispatcher.drain();
+-	// A backgrounded builtin (e.g. a /mcp reauth browser wait) must not park
+-	// the drain: tear it down now that the client is gone.
+-	abortBuiltinCommands("RPC client disconnected");
+-	if (session.isBackgroundCompacting) session.abortCompaction("RPC client disconnected");
+-	await shutdownCoordinator.drain();
+-	subagentRegistry?.dispose();
+-	// Dispose the main session before exiting so the browser reaper and other
+-	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
+-	// prior pi.shutdown() through the coordinator makes this await settle
+-	// immediately. Returned rather than awaited: `runRpcMode` is typed
+-	// `Promise<never>`, and only returning the `Promise<never>` keeps this end
+-	// point unreachable for the compiler.
+-	return disposeAndExit();
++	const finishStartup = () => {
++		const held = heldFrames;
++		heldFrames = undefined;
++		for (const parsed of held ?? []) inputDispatcher.dispatch(parsed);
++	};
++	const close = (): void => {
++		if (closed) return;
++		closed = true;
++		shutdownState.requested = true;
++		unsubscribeEvents?.();
++		unsubscribeMetadata?.();
++		unsubscribePersistence?.();
++		subagentRegistry?.dispose();
++		if (localUI) setToolUIContext?.(localUI, true);
++		pendingExtensionRequests.close(rpcDialogHandedOff);
++		hostToolBridge.close("RPC attachment is closed");
++		if (registeredHostTools) {
++			void session
++				.refreshRpcHostTools([])
++				.catch(error => logger.warn("Could not clear RPC host tools", { error: String(error) }));
++		}
++		hostUriBridge.clear("RPC attachment is closed");
++		dictationBridge.dispose();
++		void liveBridge.stop().catch(error => logger.warn("Could not close RPC live voice", { error: String(error) }));
++		abortBuiltinCommands("RPC attachment is closed");
++		void btw.close().catch(error => logger.warn("Could not close RPC side question", { error: String(error) }));
++	};
++	if (localUI) {
++		unsubscribeEvents = subscribeEvents();
++		unsubscribePersistence = subscribePersistence();
++		unsubscribeMetadata = subscribeMetadata();
++		finishStartup();
++		announceReady();
++		void emitAvailableCommandsUpdate().catch(error =>
++			logger.warn("Could not publish RPC commands", { error: String(error) }),
++		);
++	}
++	return {
++		receive: receiveFrame,
++		disposeDictation: () => dictationBridge.dispose(),
++		close,
++		async runStdio(input: ReadableStream<Uint8Array>, writer: RpcOutputWriter): Promise<never> {
++			stdioWriter = writer;
++			const { inputRead } = await startStdio(input);
++			unsubscribeEvents = subscribeEvents();
++			await goalController.reconcile();
++			await goalController.settled();
++			unsubscribePersistence = subscribePersistence();
++			unsubscribeMetadata = subscribeMetadata();
++			await emitAvailableCommandsUpdate();
++			finishStartup();
++			await inputRead;
++			// Release side-channel waiters before draining work accepted before stdin closed.
++			pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
++			hostToolBridge.close("RPC client disconnected before host tool execution completed");
++			hostUriBridge.clear("RPC client disconnected before host URI request completed");
++			dictationBridge.dispose();
++			await liveBridge.stop();
++			await inputDispatcher.drain();
++			abortBuiltinCommands("RPC client disconnected");
++			if (session.isBackgroundCompacting) session.abortCompaction("RPC client disconnected");
++			await shutdownCoordinator.drain();
++			subagentRegistry?.dispose();
++			return disposeAndExit(writer);
++		},
++	};
+ }
+diff --git a/packages/coding-agent/src/modes/types.ts b/packages/coding-agent/src/modes/types.ts
+index b3ba764341..2add3cabeb 100644
+--- a/packages/coding-agent/src/modes/types.ts
++++ b/packages/coding-agent/src/modes/types.ts
+@@ -85,6 +85,7 @@ import type { BlockedKind } from "../utils/run-status";
+ import type { TokenRateMeter } from "../utils/token-rate";
+ import type { TranscriptReplica } from "./interactive/transcript-replica";
+ import type { EventController } from "./controllers/event-controller";
++import type { StandbyController } from "./controllers/standby-controller";
+ import type { OAuthManualInputManager } from "./oauth-manual-input";
+ import type { ConversationPosition } from "./utils/conversation-position";
+ import type { StatusNoticeAction } from "./view-model/chrome/status-notice";
+@@ -691,6 +692,8 @@ export interface InteractiveModeContext {
+ 	locallySubmittedUserSignatures: Set<string>;
+ 	lastSigintTime: number;
+ 	lastEscapeTime: number;
++	/** The remote client attached to this terminal session, if any; the TUI stands by while it controls (ADR 0027). */
++	readonly standby: StandbyController;
+ 	/** Owns Esc for every `/mcp test` that is active or whose cancellation hint may still be visible. */
+ 	mcpTestEscapeHandlers: Set<() => void>;
+ 	lastLeftTapTime: number;
+diff --git a/packages/coding-agent/test/daemon/cgsconnect-module.test.ts b/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
+index efeb74791a..4b48ab4a83 100644
+--- a/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
++++ b/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
+@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it } from "bun:test";
+ import * as fs from "node:fs";
+ import * as os from "node:os";
+ import * as path from "node:path";
+-import type { ModuleClient, ModuleContext, ModuleOpen } from "../../src/daemon/module";
++import type { ModuleClient, ModuleContext, ModuleOpen, ModuleTunnel } from "../../src/daemon/module";
+ import { cgsconnectModule, type CgsconnectUnit } from "../../src/daemon/modules/cgsconnect";
+ import { DAEMON_MODULES } from "../../src/daemon/modules";
+ import { GLOBAL_SCOPE } from "../../src/daemon/protocol";
+@@ -40,7 +40,7 @@ export function open(stateDir, key, params) {
+ 		exited: exited.promise,
+ 		pids: () => [],
+ 		busy: () => false,
+-		attach() {},
++		attach(tunnel, channel) { tunnel.start((data) => tunnel.send(data), () => {}); tunnel.send(channel); },
+ 		async stop() { exited.resolve({}); },
+ 		async invoke(method, args) { return { method, args, stateDir, key, seen: params.impl.endsWith("impl.mjs") }; },
+ 	};
+@@ -57,18 +57,46 @@ it("loads the unit from params.impl, keys it, and forwards calls to it", async (
+ 		snapshot: {} as never,
+ 		unit,
+ 	});
+-	expect(reply).toEqual({ method: "status", args: { a: 1 }, stateDir: path.join(root, "state"), key: "device-a", seen: true });
++	expect(reply).toEqual({
++		method: "status",
++		args: { a: 1 },
++		stateDir: path.join(root, "state"),
++		key: "device-a",
++		seen: true,
++	});
++});
++
++it("passes the module's channel and tunnel to the loaded unit", async () => {
++	const unit = await cgsconnectModule.open(context(), openRequest({ impl: writeImpl(IMPL) }));
++	const writes: (string | Uint8Array)[] = [];
++	let receive: ((chunk: Uint8Array) => void) | undefined;
++	const tunnel: ModuleTunnel = {
++		client: CLIENT,
++		send(data) {
++			writes.push(data);
++			return true;
++		},
++		async drained() {},
++		start(onData) {
++			receive = onData;
++		},
++		close() {},
++	};
++	await unit.attach(tunnel, "test-channel");
++	const frame = new TextEncoder().encode('{"type":"get_state"}\n');
++	receive!(frame);
++	expect(writes).toEqual(["test-channel", frame]);
+ });
+ 
+ it("refuses an impl that is not an absolute path to a module with open()", async () => {
+ 	await expect(cgsconnectModule.open(context(), openRequest({}))).rejects.toThrow("params.impl");
+ 	await expect(cgsconnectModule.open(context(), openRequest({ impl: "relative.mjs" }))).rejects.toThrow("params.impl");
+-	await expect(cgsconnectModule.open(context(), openRequest({ impl: path.join(root, "missing.mjs") }))).rejects.toThrow(
+-		"params.impl",
+-	);
+-	await expect(cgsconnectModule.open(context(), openRequest({ impl: writeImpl("export const x = 1;") }))).rejects.toThrow(
+-		"does not export open()",
+-	);
++	await expect(
++		cgsconnectModule.open(context(), openRequest({ impl: path.join(root, "missing.mjs") })),
++	).rejects.toThrow("params.impl");
++	await expect(
++		cgsconnectModule.open(context(), openRequest({ impl: writeImpl("export const x = 1;") })),
++	).rejects.toThrow("does not export open()");
+ });
+ 
+ it("holds the unit only while a process leases it", () => {
+diff --git a/packages/coding-agent/test/interactive-mode-rpc-attach.test.ts b/packages/coding-agent/test/interactive-mode-rpc-attach.test.ts
+new file mode 100644
+index 0000000000..a815d546f7
+--- /dev/null
++++ b/packages/coding-agent/test/interactive-mode-rpc-attach.test.ts
+@@ -0,0 +1,154 @@
++import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
++import * as path from "node:path";
++import { Agent } from "@oh-my-pi/pi-agent-core";
++import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
++import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
++import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
++import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
++import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
++import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
++import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
++import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
++import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
++import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
++import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
++import { TempDir } from "@oh-my-pi/pi-utils";
++import { initTheme } from "../src/ui/theme/service";
++import { createModeTerminal, type ModeTerminal, pressKey } from "./helpers/mode-terminal";
++
++type Attach = (send: (line: string) => void) => { receive(frame: unknown): void; close(): void };
++type Frame = { type: string; id?: string; command?: string; method?: string; success?: boolean; timeout?: number };
++
++describe("RPC attach to an interactive session", () => {
++	let dir: TempDir;
++	let auth: AuthStorage;
++	let mock: MockModel;
++	let session: AgentSession;
++	let terminal: ModeTerminal;
++	let mode: InteractiveMode;
++	let attach: Attach;
++	let attachment: { receive(frame: unknown): void; close(): void } | undefined;
++	let frames: Frame[];
++	let changed: PromiseWithResolvers<void>;
++	let askAbort: AbortController;
++
++	beforeAll(() => initTheme());
++
++	beforeEach(async () => {
++		resetSettingsForTest();
++		dir = TempDir.createSync("@pi-tui-attach-");
++		const cwd = dir.path();
++		await Settings.init({ inMemory: true, cwd, overrides: { "startup.quiet": true } });
++		auth = await AuthStorage.create(path.join(cwd, "auth.db"));
++		auth.keys.setRuntime("anthropic", "test-key");
++		const registry = new ModelRegistry(auth, path.join(cwd, "models.yml"));
++		const manager = SessionManager.create(cwd, cwd);
++		const runtime = new ExtensionRuntime();
++		const eventBus = new EventBus();
++		const extension = await loadExtensionFromFactory(
++			pi =>
++				pi.on("tui_attach", event => {
++					attach = event.attach;
++				}),
++			cwd,
++			eventBus,
++			runtime,
++			"fake-remote",
++		);
++		const runner = new ExtensionRunner([extension], runtime, cwd, manager, registry);
++		mock = createMockModel({ handler: { content: ["visible on both terminals"] } });
++		session = new AgentSession({
++			agent: new Agent({
++				getApiKey: () => "test-key",
++				initialState: {
++					model: getBundledModel("anthropic", "claude-sonnet-4-5")!,
++					systemPrompt: ["Test"],
++					tools: [],
++				},
++				streamFn: mock.stream,
++			}),
++			sessionManager: manager,
++			settings: Settings.isolated({ "startup.quiet": true, "compaction.enabled": false }),
++			modelRegistry: registry,
++			extensionRunner: runner,
++		});
++		terminal = createModeTerminal({ columns: 120, rows: 34 });
++		await terminal.start();
++		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, terminal.frame);
++		await mode.init({ suppressWelcomeIntro: true });
++		frames = [];
++		changed = Promise.withResolvers<void>();
++		askAbort = new AbortController();
++		attachment = attach(line => {
++			frames.push(JSON.parse(line));
++			changed.resolve();
++			changed = Promise.withResolvers<void>();
++		});
++	});
++
++	afterEach(async () => {
++		askAbort?.abort();
++		attachment?.close();
++		attachment = undefined;
++		mode?.stop();
++		await mode?.shell.stop();
++		terminal?.dispose();
++		await session?.dispose();
++		auth?.close();
++		dir?.removeSync();
++		resetSettingsForTest();
++	});
++
++	async function frame(match: (frame: Frame) => boolean): Promise<Frame> {
++		for (;;) {
++			const found = frames.find(match);
++			if (found) return found;
++			await changed.promise;
++		}
++	}
++
++	it("streams normal RPC frames to the browser and renders the same turn in the TUI", async () => {
++		await terminal.waitFor(rows =>
++			rows.some(row => row.includes("CGSConnected, standing by. Press Esc to take over.")),
++		);
++		attachment!.receive({ id: "remote-prompt", type: "prompt", message: "hello from remote" });
++		expect(await frame(f => f.type === "response" && f.id === "remote-prompt")).toMatchObject({ success: true });
++		await frame(f => f.type === "message_update");
++		await frame(f => f.type === "prompt_result" && f.id === "remote-prompt");
++		await frame(f => f.type === "session_settled");
++		await terminal.waitFor(rows => rows.some(row => row.includes("visible on both terminals")));
++
++		mode.composer.setText("/usage");
++		pressKey(mode.shell, "enter");
++		await terminal.settle();
++		expect(frames.some(f => f.type === "taken_over")).toBe(false);
++		mode.composer.setText("/rename terminal took control");
++		pressKey(mode.shell, "enter");
++		await frame(f => f.type === "taken_over");
++		await terminal.waitFor(rows => rows.every(row => !row.includes("CGSConnected, standing by.")));
++	}, 15_000);
++
++	it("a single Esc moves a pending ask to the TUI without interrupting the turn", async () => {
++		mock.push(async () => {
++			await session.extensionRunner!.getUIContext().askDialog!(
++				[{ id: "pending", question: "Choose after takeover", options: [{ label: "Keep going" }] }],
++				{ signal: askAbort.signal },
++			);
++			return { content: ["completed after takeover"] };
++		});
++		attachment!.receive({ id: "enable-ask", type: "set_ask_dialog", enabled: true });
++		await frame(f => f.id === "enable-ask" && f.success === true);
++		attachment!.receive({ id: "remote-prompt", type: "prompt", message: "ask before finishing" });
++		const pending = await frame(f => f.type === "extension_ui_request" && f.method === "ask");
++		expect(pending.timeout).toBeUndefined();
++		pressKey(mode.shell, "escape");
++		await frame(f => f.type === "taken_over");
++		attachment!.receive({ type: "extension_ui_response", id: pending.id, cancelled: true });
++		await terminal.waitFor(rows => rows.some(row => row.includes("Choose after takeover")));
++		expect(session.isStreaming).toBe(true);
++		askAbort.abort();
++		await session.waitForIdle();
++		await terminal.waitFor(rows => rows.some(row => row.includes("completed after takeover")));
++		expect(frames.filter(f => f.type === "taken_over")).toHaveLength(1);
++	}, 15_000);
++});
+diff --git a/packages/coding-agent/test/standby-controller.test.ts b/packages/coding-agent/test/standby-controller.test.ts
+new file mode 100644
+index 0000000000..1e7635befd
+--- /dev/null
++++ b/packages/coding-agent/test/standby-controller.test.ts
+@@ -0,0 +1,90 @@
++import { describe, expect, it, vi } from "bun:test";
++import {
++	isStandbyAllowedCommandText,
++	StandbyController,
++	standbyAllowsKey,
++	standbyEscAction,
++} from "../src/modes/controllers/standby-controller";
++
++function controller(onEscAction: (action: "stop" | "rewind") => void = () => {}) {
++	const sent: string[] = [];
++	let closed = 0;
++	const standby = new StandbyController({
++		open: send => {
++			send('{"type":"ready"}');
++			return { receive() {}, close: () => void closed++ };
++		},
++		onEscAction,
++		escWindowMs: 500,
++	});
++	return { standby, sent, closed: () => closed, attach: () => standby.attach(line => sent.push(line)) };
++}
++
++describe("standby Esc and commands", () => {
++	it("maps one, two and three presses to takeover, stop and rewind", () => {
++		expect([1, 2, 3, 4].map(standbyEscAction)).toEqual(["takeover", "stop", "rewind", "rewind"]);
++	});
++
++	it("allows only read-only forms of whitelisted commands; unknown commands take over", () => {
++		expect(isStandbyAllowedCommandText("/usage")).toBe(true);
++		expect(isStandbyAllowedCommandText("/usage reset")).toBe(false);
++		expect(isStandbyAllowedCommandText("/rename x")).toBe(false);
++		expect(isStandbyAllowedCommandText("hello")).toBe(false);
++		expect(standbyAllowsKey(action => action === "app.tools.expand")).toBe(true);
++		expect(standbyAllowsKey(action => action === "app.model.cycleForward")).toBe(false);
++	});
++
++	it("a single Esc takes over after the window and tells the remote", () => {
++		vi.useFakeTimers();
++		try {
++			const actions: string[] = [];
++			const { standby, sent, closed, attach } = controller(a => actions.push(a));
++			attach();
++			expect(standby.escape()).toBe(true);
++			vi.advanceTimersByTime(499);
++			expect(standby.active).toBe(true);
++			vi.advanceTimersByTime(1);
++			expect(standby.active).toBe(false);
++			expect(sent.at(-1)).toBe('{"type":"taken_over"}');
++			expect(closed()).toBe(1);
++			expect(actions).toEqual([]);
++		} finally {
++			vi.useRealTimers();
++		}
++	});
++
++	it("a double Esc takes over and stops; a third press rewinds at once", () => {
++		vi.useFakeTimers();
++		try {
++			const actions: string[] = [];
++			const { standby, attach } = controller(a => actions.push(a));
++			attach();
++			standby.escape();
++			standby.escape();
++			vi.advanceTimersByTime(500);
++			expect(actions).toEqual(["stop"]);
++			attach();
++			standby.escape();
++			standby.escape();
++			standby.escape();
++			expect(actions).toEqual(["stop", "rewind"]);
++			expect(standby.active).toBe(false);
++		} finally {
++			vi.useRealTimers();
++		}
++	});
++
++	it("refuses a second remote and ignores frames after takeover", () => {
++		const received: unknown[] = [];
++		const standby = new StandbyController({
++			open: () => ({ receive: frame => received.push(frame), close() {} }),
++			onEscAction() {},
++		});
++		const handle = standby.attach(() => {});
++		expect(() => standby.attach(() => {})).toThrow("already controls");
++		handle.receive({ n: 1 });
++		standby.takeOver();
++		handle.receive({ n: 2 });
++		expect(received).toEqual([{ n: 1 }]);
++	});
++});
+-- 
+2.47.3
+
