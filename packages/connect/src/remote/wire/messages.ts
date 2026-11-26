@@ -42,6 +42,9 @@ export class WireError extends Error {
   }
 }
 
+/** The `close` reason for a stream that names no running child: reopening it cannot succeed. */
+export const UNKNOWN_CHILD_REASON = "Unknown omp child";
+
 export type WireMessage =
   | { k: "hello"; proto: 1 }
   | { k: "busy" | "taken_over"; by: string }
@@ -50,6 +53,7 @@ export type WireMessage =
   | { k: "req"; id: string; method: string; path: string; body?: unknown }
   | { k: "res"; id: string; status: number; body: unknown }
   | { k: "open"; cid: string; path: string }
+  | { k: "ready"; cid: string }
   | { k: "frame"; cid: string; text: string }
   | { k: "close"; cid: string; reason?: string };
 
@@ -281,6 +285,10 @@ function validateMessage(value: unknown): WireMessage {
       fields(value, ["k", "cid", "path"]);
       requireString(value, "cid");
       requireString(value, "path");
+      break;
+    case "ready":
+      fields(value, ["k", "cid"]);
+      requireString(value, "cid");
       break;
     case "frame":
       fields(value, ["k", "cid", "text"]);

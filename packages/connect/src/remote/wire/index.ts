@@ -12,7 +12,7 @@ export {
   type AuthorizedBrowser,
   type DeviceCredentials,
 } from "./credentials.ts";
-export { encodeMessage, FrameDecoder, WIRE_LIMITS, WireError, type EncodeOptions, type WireMessage } from "./messages.ts";
+export { encodeMessage, FrameDecoder, UNKNOWN_CHILD_REASON, WIRE_LIMITS, WireError, type EncodeOptions, type WireMessage } from "./messages.ts";
 export {
   BrowserSession,
   DeviceSession,

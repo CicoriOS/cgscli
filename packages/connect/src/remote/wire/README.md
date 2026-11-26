@@ -18,7 +18,7 @@ interface Channel { seal(plain: Uint8Array): Uint8Array; open(cipher: Uint8Array
 
 type WireMessage = { k:'hello'; proto:1 } | { k:'busy'|'taken_over'; by:string } | { k:'takeover' } | { k:'error'; code:string }
  | { k:'req'; id:string; method:string; path:string; body?:unknown } | { k:'res'; id:string; status:number; body:unknown }
- | { k:'open'; cid:string; path:string } | { k:'frame'; cid:string; text:string } | { k:'close'; cid:string; reason?:string };
+ | { k:'open'; cid:string; path:string } | { k:'ready'; cid:string } | { k:'frame'; cid:string; text:string } | { k:'close'; cid:string; reason?:string };
 function encodeMessage(message: WireMessage, options?: {compress?:boolean}): Promise<Uint8Array[]>;
 class FrameDecoder { push(chunk: Uint8Array): Promise<WireMessage|null> }
 

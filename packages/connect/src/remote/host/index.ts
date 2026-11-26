@@ -4,6 +4,7 @@
 // bridge's per-child WebSocket (wire messages req/res and open/frame/close, ADR 0036).
 import fs from "node:fs";
 import path from "node:path";
+import { UNKNOWN_CHILD_REASON } from "../wire/index.ts";
 import { createStore, type Store } from "./store.ts";
 
 export type { Completion, SessionRow, Sessions, Store, Workspace } from "./store.ts";
@@ -437,7 +438,7 @@ export function createHost(opts: HostOptions): Host {
       const childId = new URL(wsPath, "http://host.invalid").searchParams.get("child") ?? cid;
       const child = children.get(childId);
       if (!child?.ready || child.stopping || sockets.has(cid)) {
-        handlers.onClose(cid, "Unknown omp child");
+        handlers.onClose(cid, UNKNOWN_CHILD_REASON);
         return;
       }
       const socket: Socket = { cid, child, handlers };

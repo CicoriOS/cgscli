@@ -239,7 +239,7 @@ export class Sessions {
         const key = this.#key(s, message.cid);
         s.cids.add(message.cid);
         this.#o.host.open(key, message.path, {
-          onOpen: () => {},
+          onOpen: () => void this.#send(s, { k: "ready", cid: message.cid }),
           onFrame: (_k, text) => void this.#send(s, { k: "frame", cid: message.cid, text }),
           onClose: (_k, reason) => {
             s.cids.delete(message.cid);

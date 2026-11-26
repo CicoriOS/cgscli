@@ -251,6 +251,7 @@ describe("a browser connecting", () => {
     expect(b.got("res")).toEqual({ k: "res", id: "1", status: 200, body: { echo: "/api/info" } });
 
     await b.say({ k: "open", cid: "c1", path: "/ws?child=abc" });
+    expect(b.got("ready")).toEqual({ k: "ready", cid: "c1" });
     await b.say({ k: "frame", cid: "c1", text: "ping" });
     expect(b.messages.find((m) => m.k === "frame")).toEqual({ k: "frame", cid: "c1", text: "echo:ping" });
   });
