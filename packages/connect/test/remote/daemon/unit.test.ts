@@ -52,7 +52,8 @@ class FakeHost implements Host {
   streams = new Map<string, SocketHandlers>();
   async request(req: { method: string; path: string }) {
     this.requests.push(req);
-    return { status: 200, body: { echo: req.path } };
+    // Like the real host: optional fields are present as undefined, which JSON would drop.
+    return { status: 200, body: { echo: req.path, title: undefined } };
   }
   open(cid: string, _path: string, handlers: SocketHandlers) {
     this.streams.set(cid, handlers);

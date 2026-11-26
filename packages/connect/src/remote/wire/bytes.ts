@@ -20,7 +20,7 @@ export function toBase64(bytes: Uint8Array): string {
 }
 
 /** Decode strict RFC 4648 padded base64. */
-export function fromBase64(encoded: string): Uint8Array {
+export function fromBase64(encoded: string): Uint8Array<ArrayBuffer> {
   if (encoded.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Error("invalid base64");
   const out = new Uint8Array((encoded.length / 4) * 3 - (encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0));
   let oi = 0;
@@ -36,7 +36,7 @@ export function fromBase64(encoded: string): Uint8Array {
   return out;
 }
 
-export function concatBytes(...parts: readonly Uint8Array[]): Uint8Array {
+export function concatBytes(...parts: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let off = 0;
   for (const p of parts) { out.set(p, off); off += p.length; }

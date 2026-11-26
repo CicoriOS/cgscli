@@ -1,4 +1,4 @@
-From b5c1b92c3f970959809cff0ee453629e77cee703 Mon Sep 17 00:00:00 2001
+From db44397b4d174d61c51681922e12879cf86c6aca Mon Sep 17 00:00:00 2001
 From: t <a@b.c>
 Date: Thu, 26 Nov 2026 20:12:58 +0800
 Subject: [PATCH] P12: cgsconnect daemon module (loader for the CGS
@@ -10,8 +10,9 @@ Remove-when: upstream lets extensions register daemon modules at runtime.
 ---
  .../src/daemon/modules/cgsconnect.ts          | 56 ++++++++++++++
  .../coding-agent/src/daemon/modules/index.ts  |  2 +
+ packages/coding-agent/src/index.ts            |  2 +
  .../test/daemon/cgsconnect-module.test.ts     | 76 +++++++++++++++++++
- 3 files changed, 134 insertions(+)
+ 4 files changed, 136 insertions(+)
  create mode 100644 packages/coding-agent/src/daemon/modules/cgsconnect.ts
  create mode 100644 packages/coding-agent/test/daemon/cgsconnect-module.test.ts
 
@@ -95,6 +96,19 @@ index 2184980092..a8b119ecab 100644
  	transcriptsModule,
 +	cgsconnectModule,
  ];
+diff --git a/packages/coding-agent/src/index.ts b/packages/coding-agent/src/index.ts
+index e6da14c17b..2c95df5e67 100644
+--- a/packages/coding-agent/src/index.ts
++++ b/packages/coding-agent/src/index.ts
+@@ -4,6 +4,8 @@ export * as zod from "@oh-my-pi/omptype/zod";
+ export { z } from "@oh-my-pi/omptype/zod";
+ // Logging
+ export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
++// The omp daemon's client: the CGS extension reaches its `cgsconnect` unit through it (extensions import host values from the root).
++export { daemonClient } from "./daemon/client";
+ export {
+ 	type AppKeybinding,
+ 	getDefaultPasteImageKeys,
 diff --git a/packages/coding-agent/test/daemon/cgsconnect-module.test.ts b/packages/coding-agent/test/daemon/cgsconnect-module.test.ts
 new file mode 100644
 index 0000000000..efeb74791a

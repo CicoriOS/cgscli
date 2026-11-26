@@ -82,7 +82,7 @@ export async function encodeMessage(message: WireMessage, options: EncodeOptions
 interface Pending {
   total: number;
   deflate: boolean;
-  parts: Uint8Array[];
+  parts: Uint8Array<ArrayBuffer>[];
   received: number;
 }
 
@@ -184,7 +184,7 @@ interface Codec {
 }
 
 /** Returns the deflated input, or null when CompressionStream is unavailable or the output would not be smaller. */
-async function deflateRaw(input: Uint8Array): Promise<Uint8Array | null> {
+async function deflateRaw(input: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer> | null> {
   let codec: Codec;
   try {
     codec = new CompressionStream("deflate-raw");
@@ -195,14 +195,14 @@ async function deflateRaw(input: Uint8Array): Promise<Uint8Array | null> {
 }
 
 /** Inflates a body, failing as soon as the output exceeds the message limit. */
-async function inflateRaw(input: Uint8Array): Promise<Uint8Array> {
+async function inflateRaw(input: Uint8Array<ArrayBuffer>): Promise<Uint8Array<ArrayBuffer>> {
   let codec: Codec;
   try {
     codec = new DecompressionStream("deflate-raw");
   } catch {
     throw new WireError("deflate-raw is not supported in this runtime");
   }
-  let out: Uint8Array | null;
+  let out: Uint8Array<ArrayBuffer> | null;
   try {
     out = await pump(codec, input, WIRE_LIMITS.messageBytes);
   } catch {
@@ -213,12 +213,12 @@ async function inflateRaw(input: Uint8Array): Promise<Uint8Array> {
 }
 
 /** Runs input through a codec and collects the output. Resolves null as soon as the output would exceed limit. */
-async function pump(codec: Codec, input: Uint8Array, limit: number): Promise<Uint8Array | null> {
+async function pump(codec: Codec, input: Uint8Array<ArrayBuffer>, limit: number): Promise<Uint8Array<ArrayBuffer> | null> {
   const writer = codec.writable.getWriter();
   const writing = writer.write(input).then(() => writer.close());
   writing.catch(() => {}); // a failure also errors the readable side, where it is reported
   const reader = codec.readable.getReader();
-  const parts: Uint8Array[] = [];
+  const parts: Uint8Array<ArrayBuffer>[] = [];
   let size = 0;
   for (;;) {
     const next = await reader.read();
@@ -228,13 +228,13 @@ async function pump(codec: Codec, input: Uint8Array, limit: number): Promise<Uin
       await reader.cancel();
       return null;
     }
-    parts.push(next.value);
+    parts.push(next.value as Uint8Array<ArrayBuffer>); // a codec's output is always ArrayBuffer-backed
   }
   await writing;
   return concat(parts, size);
 }
 
-function concat(parts: Uint8Array[], size: number): Uint8Array {
+function concat(parts: Uint8Array<ArrayBuffer>[], size: number): Uint8Array<ArrayBuffer> {
   if (parts.length === 1) return parts[0]!;
   const out = new Uint8Array(size);
   let off = 0;

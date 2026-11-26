@@ -232,7 +232,8 @@ export class Sessions {
     switch (message.k) {
       case "req":
         void this.#o.host.request({ method: message.method, path: message.path, body: message.body }).then((res) =>
-          this.#send(s, { k: "res", id: message.id, status: res.status, body: res.body }),
+          // The bridge answered in JSON, where a key holding undefined does not exist; the wire accepts only that.
+          this.#send(s, { k: "res", id: message.id, status: res.status, body: JSON.parse(JSON.stringify(res.body ?? null)) }),
         );
         return;
       case "open": {

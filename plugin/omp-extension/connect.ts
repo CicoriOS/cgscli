@@ -65,10 +65,20 @@ export function inheritedArgs(argv: readonly string[]): string[] {
 
 const here = () => fileURLToPath(new URL("../../packages/connect/src/remote/daemon/module.ts", import.meta.url));
 
-/** The omp daemon's unit, over its client. Imported lazily: a moved internal path costs remote access, not the extension. */
+/** The part of omp's daemon client this file uses. */
+interface DaemonClientLike {
+  open(request: { kind: string; scope: { kind: "global" }; key: string; label: string; lease: boolean; params: unknown }): Promise<{ unit: { id: string } }>;
+  call<T>(module: string, method: string, params: unknown, options: { unit: string }): Promise<T>;
+}
+
+/**
+ * The omp daemon's unit, over its client (exported by omp's package root: patch P12). Imported lazily so a stock omp,
+ * which lacks the export, loses remote access instead of the extension.
+ */
 async function openDaemonUnit(file: string): Promise<UnitPort> {
-  const { daemonClient } = (await import("@oh-my-pi/pi-coding-agent/daemon/client")) as typeof import("@oh-my-pi/pi-coding-agent/daemon/client");
-  const client = await daemonClient();
+  const host = (await import("@oh-my-pi/pi-coding-agent")) as { daemonClient?: () => Promise<DaemonClientLike> };
+  if (!host.daemonClient) throw new Error("This omp build has no cgsconnect daemon module.");
+  const client = await host.daemonClient();
   const opened = await client.open({ kind: "cgsconnect", scope: { kind: "global" }, key: UNIT_KEY, label: "CGS remote access", lease: true, params: { impl: here(), stateFile: file } });
   return { call: <T>(method: string, params?: unknown) => client.call<T>("cgsconnect", method, params, { unit: opened.unit.id }) };
 }
