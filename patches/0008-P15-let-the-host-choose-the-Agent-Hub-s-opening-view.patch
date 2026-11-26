@@ -1,0 +1,82 @@
+From 542247ac8b3272b6d2eaafe2890b368f236df4f3 Mon Sep 17 00:00:00 2001
+From: t <a@b.c>
+Date: Thu, 26 Nov 2026 19:14:40 +0800
+Subject: [PATCH] P15: let the host choose the Agent Hub's opening view
+
+Reason: the CGS TUI wants Alt+A to open the Agent Hub grouped By parent; the hub only had the flat roster as its opening view (t toggles).
+Upstream: none.
+Remove-when: upstream lets the Agent Hub's default view be configured, or adopts By parent as the default.
+---
+ .../modes/controllers/selector-controller.ts  |  1 +
+ .../src/ui/overlays/pickers/agent-hub.tsx     |  4 +++-
+ .../test/agent-hub-ordering.test.ts           | 20 +++++++++++++++++++
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/packages/coding-agent/src/modes/controllers/selector-controller.ts b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+index 969f4a2e27..4a112439cc 100644
+--- a/packages/coding-agent/src/modes/controllers/selector-controller.ts
++++ b/packages/coding-agent/src/modes/controllers/selector-controller.ts
+@@ -2685,6 +2685,7 @@ export class SelectorController {
+ 						observers,
+ 						hubKeys,
+ 						initialSection: options?.initialSection,
++						initialView: "tree",
+ 						rows: () => size().rows,
+ 						focusAgent: id => this.ctx.focusAgentSession(id),
+ 						openTranscript,
+diff --git a/packages/coding-agent/src/ui/overlays/pickers/agent-hub.tsx b/packages/coding-agent/src/ui/overlays/pickers/agent-hub.tsx
+index ec6dad9c2d..401eaca235 100644
+--- a/packages/coding-agent/src/ui/overlays/pickers/agent-hub.tsx
++++ b/packages/coding-agent/src/ui/overlays/pickers/agent-hub.tsx
+@@ -152,6 +152,8 @@ export interface AgentHubProps<T extends AgentRecordLike = AgentRecordLike> {
+ 	/** Key ids that close the hub from inside (its own toggle keys). */
+ 	readonly hubKeys: readonly string[];
+ 	readonly initialSection?: AgentHubSection;
++	/** Roster projection the hub opens in (default `roster`, the flat list; `t` toggles). */
++	readonly initialView?: "roster" | "tree";
+ 	/** Whether the hub feeds observer progress into the live activity rows (default true). */
+ 	readonly manageActivityLive?: boolean;
+ 	/** Terminal rows the hub may fill. */
+@@ -295,7 +297,7 @@ export function AgentHub<T extends AgentRecordLike>(
+ 	let disposed = false;
+ 	let section: AgentHubSection = props.initialSection ?? "agents";
+ 	let loading = !props.remote && Boolean(props.sessionFile?.endsWith(".jsonl"));
+-	let viewMode: ViewMode = "roster";
++	let viewMode: ViewMode = props.initialView ?? "roster";
+ 	let statusScope: StatusScope = "all";
+ 	const filter: LineInput = { text: "", cursor: 0, editing: false };
+ 	const search: LineInput = { text: "", cursor: 0, editing: false };
+diff --git a/packages/coding-agent/test/agent-hub-ordering.test.ts b/packages/coding-agent/test/agent-hub-ordering.test.ts
+index f58a2cc84e..2a3ba688b1 100644
+--- a/packages/coding-agent/test/agent-hub-ordering.test.ts
++++ b/packages/coding-agent/test/agent-hub-ordering.test.ts
+@@ -1199,6 +1199,26 @@ describe("Agent hub row ordering", () => {
+ 			hub.dispose();
+ 		}
+ 	});
++	it("opens in By parent when the host asks for it", () => {
++		vi.useFakeTimers();
++		geometry = stubStdoutGeometry(120);
++		const agents = new AgentRegistry();
++		setSystemTime(1_000);
++		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
++		setSystemTime(2_000);
++		agents.register({ id: "Child", displayName: "Child", kind: "sub", parentId: "Parent", session: null });
++		const hub = makeHub(agents, { initialView: "tree" });
++
++		try {
++			expect(renderedAgentIds(hub)).toEqual(["Parent", "Child"]);
++			hub.handleInput("t");
++			expect(renderedAgentIds(hub)).toEqual(["Child", "Parent"]);
++		} finally {
++			hub.dispose();
++			vi.useRealTimers();
++			setSystemTime();
++		}
++	});
+ 	it("switches between inline Flat and By parent projections with selection preserved", () => {
+ 		vi.useFakeTimers();
+ 		geometry = stubStdoutGeometry(120);
+-- 
+2.47.3
+
