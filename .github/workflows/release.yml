@@ -4,21 +4,16 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
-  id-token: write   # npm trusted publishing (OIDC); no npm token is stored
+  contents: read
 
 jobs:
-  release:
+  pack:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.4'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
       - name: Build patched npm bundle
         run: |
           bun install --frozen-lockfile
@@ -35,15 +30,39 @@ jobs:
           tag="$GITHUB_REF_NAME"
           bun scripts/pack-release.ts "${tag##*-cgs.}" --out-dir "$RUNNER_TEMP/release"
           test -f "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz"
+          mkdir release && cp "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz" release/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: release/*.tgz
+          if-no-files-found: error
+
+  # A separate job so that a failed publish is retried without rebuilding.
+  publish:
+    needs: pack
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # the GitHub release
+      id-token: write   # npm trusted publishing (OIDC); no npm token is stored
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+          path: release
+      # No registry-url: setup-node would write an .npmrc and export a placeholder NODE_AUTH_TOKEN, which npm would use instead of OIDC.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - name: Publish to npm
-        # Trusted publishing needs npm >= 11.5.1. The version is in the tarball; a tag that disagrees fails here.
+        # Trusted publishing needs npm >= 11.5.1.
         run: |
           npm install -g npm@latest
-          npm publish "$RUNNER_TEMP/release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz" --access public --provenance --tag latest
+          npm --version
+          npm publish "release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz" --access public --provenance --tag latest
       - name: Attach the tarball to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
-          gh release view "$tag" >/dev/null || gh release create "$tag" --verify-tag --generate-notes
-          gh release upload "$tag" "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz" --clobber
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes
+          gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "release/cicori-cgs-${tag#v}.tgz" --clobber
