@@ -105,9 +105,9 @@ body.running #send { background: #0d0d0d; }
 .body pre { margin: 8px 0 12px; padding: 12px 14px; background: #f6f6f6; border-radius: 12px; overflow-x: auto; }
 .body pre code { background: none; padding: 0; font-size: 12.8px; }
 .body a { color: var(--accent); }
-.thought, .tool { margin: 6px 0; border: 1px solid var(--line); border-radius: 12px; background: #fcfcfc; }
-.thought > summary, .tool > summary { cursor: pointer; padding: 6px 12px; color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
-.thought > div, .tool .tb { padding: 2px 12px 10px; font-size: 13px; color: #444; white-space: pre-wrap; word-break: break-word; }
+.tool { margin: 6px 0; border: 1px solid var(--line); border-radius: 12px; background: #fcfcfc; }
+.tool > summary { cursor: pointer; padding: 6px 12px; color: var(--muted); font-size: 13px; display: flex; gap: 8px; align-items: baseline; }
+.tool .tb { padding: 2px 12px 10px; font-size: 13px; color: #444; white-space: pre-wrap; word-break: break-word; }
 .tool .name { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
 .tool .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 12.5px; flex: 1; }
 .tool.err { border-color: #f0c5c1; } .tool.err > summary { color: var(--danger); }
@@ -177,3 +177,16 @@ body.running #send { background: #0d0d0d; }
 .chain.err > summary { color: var(--danger); }
 .chain .cards { padding-left: 4px; }
 .tool > summary { align-items: center; }
+/* process: thought lines, the folded "thought for Xs, N calls" line, notes */
+.thought, .proc { margin: 6px 0; }
+.thought > summary, .proc > summary { cursor: pointer; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; padding: 3px 0; list-style: none; }
+.thought > summary::-webkit-details-marker, .proc > summary::-webkit-details-marker { display: none; }
+.thought > summary::after, .proc > summary::after { content: "›"; transition: transform .15s; }
+.thought[open] > summary::after, .proc[open] > summary::after { transform: rotate(90deg); }
+.proc.err > summary { color: var(--danger); }
+.thought > .tt { padding: 2px 0 8px 28px; font-size: 13px; color: #555; white-space: pre-wrap; word-break: break-word; }
+.proc > .plist { margin: 4px 0 8px 6px; padding-left: 10px; border-left: 2px solid var(--line); }
+.proc.live > .plist { margin: 0; padding: 0; border: 0; }
+.pnote { font-size: 13px; color: var(--muted); margin: 4px 0; }
+.pnote p { margin: 2px 0; }
+.msg[hidden] { display: none; }

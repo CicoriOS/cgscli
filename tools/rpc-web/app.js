@@ -174,6 +174,7 @@ function onSettled() {
   discardPlaceholder();
   S.pendingUser = undefined;
   if (S.run) for (const r of S.run.rings) paint(r, S.run.end ?? "idle", S.level);
+  if (S.turn) { S.turn.settled = true; renderTurn(S.turn); S.turn = null; }
   S.run = null;
   paint(composerRing, "idle", S.level);
   rpc({ type: "get_state" }).then(applyState).catch(() => {});
@@ -195,7 +196,7 @@ function setHasMsgs(v) {
 }
 function resetChat() {
   transcript.replaceChildren();
-  S.msgs = {}; S.tools = {}; S.chainOpen = {}; S.run = null; S.pendingUser = undefined; S.pendingAsst = null;
+  S.msgs = {}; S.tools = {}; S.chainOpen = {}; S.run = null; S.pendingUser = undefined; S.pendingAsst = null; S.turn = null;
   S.btw = [];
   setHasMsgs(false);
   setTitle("");
@@ -283,26 +284,86 @@ function chain(calls, key) {
   return d;
 }
 
-/** Fills an assistant body from a (partial) message; keeps open/closed state of thought blocks across re-renders. */
-function fillAssistant(body, m, key) {
-  const opened = [...body.querySelectorAll("details.thought")].map((d) => d.open);
-  body.replaceChildren();
-  let ti = 0, calls = [];
-  const flush = () => { if (calls.length) body.append(chain(calls, `${key}:${body.children.length}`)); calls = []; };
-  for (const c of m.content ?? []) {
-    if (c.type === "toolCall") { (S.tools[c.id] ??= { call: c, result: null, card: h("details", { class: "tool" }) }).msgId = key; calls.push(c); continue; }
-    flush();
-    if (c.type === "text" && c.text) body.append(h("div", { html: md(c.text) }));
-    else if (c.type === "thinking" && c.thinking) body.append(h("details", { class: "thought", open: opened[ti++] }, h("summary", {}, "Thought"), h("div", {}, c.thinking)));
-  }
-  flush();
-  if (m.stopReason === "error" && m.errorMessage) body.append(h("div", { class: "errline" }, m.errorMessage));
+let turnSeq = 0;
+/** A turn is everything between one user message and the reply: its thinking and tool calls fold into one block once the reply starts. */
+function newTurn(t0, live) { return { key: `u${++turnSeq}`, t0, live, items: [] }; }
+
+function fmtDur(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 }
 
-/** Re-renders the message that owns a tool call (its chain summarises the calls' states). */
+function thoughtLine(c, key, streaming) {
+  const r = ring(true);
+  paint(r, streaming ? "think" : "idle", S.level);
+  const d = h("details", { class: "thought", open: !!S.chainOpen[key] },
+    h("summary", {}, r, h("span", { class: "cs" }, streaming ? "Thinking…" : "Thought")), h("div", { class: "tt" }, c.thinking));
+  d.addEventListener("toggle", () => { S.chainOpen[key] = d.open; });
+  return d;
+}
+
+/**
+ * Renders a turn into its assistant nodes. Thinking, tool calls and any text that comes with tool calls go to one process list in the
+ * turn's first node: lines (a thought, a tool chain) that open into cards while the model works, then one folded summary line once
+ * the reply (text in a message without tool calls) has started. The reply text stays in the node of the message it belongs to.
+ */
+function renderTurn(turn) {
+  const stick = atBottom();
+  const proc = [], texts = turn.items.map(() => []);
+  let reply = false;
+  turn.items.forEach((it, i) => {
+    const content = it.m?.content ?? [];
+    const hasCall = content.some((c) => c.type === "toolCall");
+    for (const c of content) {
+      if (c.type === "toolCall") {
+        (S.tools[c.id] ??= { call: c, result: null, card: h("details", { class: "tool" }) }).turn = turn;
+        proc.push(c);
+      } else if (c.type === "text" && c.text) {
+        if (hasCall) proc.push(c); else { texts[i].push(c.text); reply = true; }
+      } else if (c.type === "thinking" && c.thinking) proc.push(c);
+    }
+  });
+  if (turn.live) { if (reply) turn.t1 ??= Date.now(); else turn.t1 = undefined; }
+
+  let procNode = null;
+  if (proc.length) {
+    const list = h("div", { class: "plist" });
+    let calls = [];
+    const flush = () => { if (calls.length) list.append(chain(calls, `${turn.key}:${list.children.length}`)); calls = []; };
+    proc.forEach((c, i) => {
+      if (c.type === "toolCall") { calls.push(c); return; }
+      flush();
+      if (c.type === "text") list.append(h("div", { class: "pnote", html: md(c.text) }));
+      else list.append(thoughtLine(c, `${turn.key}:${list.children.length}`, !reply && turn === S.turn && !turn.settled && S.run?.state === "think" && i === proc.length - 1));
+    });
+    flush();
+    if (reply) {
+      const n = proc.filter((c) => c.type === "toolCall").length;
+      const parts = [];
+      if (proc.some((c) => c.type === "thinking")) parts.push(`思考了 ${fmtDur((turn.t1 ?? turn.t0) - turn.t0)}`);
+      if (n) parts.push(`进行了 ${n} 次调用`);
+      const failed = proc.some((c) => c.type === "toolCall" && toolState(c) === "fail");
+      const k = `${turn.key}:proc`;
+      procNode = h("details", { class: `proc${failed ? " err" : ""}`, open: !!S.chainOpen[k] }, h("summary", {}, parts.join("，")), list);
+      procNode.addEventListener("toggle", () => { S.chainOpen[k] = procNode.open; });
+    } else procNode = h("div", { class: "proc live" }, list);
+  }
+
+  turn.items.forEach((it, i) => {
+    const kids = [];
+    if (i === 0 && procNode) kids.push(procNode);
+    for (const t of texts[i]) kids.push(h("div", { html: md(t) }));
+    if (it.m?.stopReason === "error" && it.m.errorMessage) kids.push(h("div", { class: "errline" }, it.m.errorMessage));
+    it.node.body.replaceChildren(...kids);
+    if (i > 0) it.node.el.hidden = !kids.length;
+  });
+  if (stick) scroller.scrollTop = scroller.scrollHeight;
+}
+
+/** Re-renders the turn that owns a tool call (its chain summarises the calls' states). */
 function refreshOwner(toolCallId) {
-  const node = S.msgs[S.tools[toolCallId]?.msgId];
-  if (node?.last) fillAssistant(node.body, node.last, S.tools[toolCallId].msgId);
+  const turn = S.tools[toolCallId]?.turn;
+  if (turn) renderTurn(turn);
 }
 
 function assistantNode(id, m) {
@@ -318,7 +379,7 @@ function onMessage(f) {
   if (!m) return;
   if (m.role === "user") {
     if (S.pendingUser !== undefined && textOf(m.content).trim() === S.pendingUser) { S.pendingUser = undefined; return; } // already shown
-    if (f.type === "message_start") { appendBlock(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
+    if (f.type === "message_start") { S.turn = newTurn(Date.now(), true); appendBlock(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
     return;
   }
   if (m.role === "toolResult") {
@@ -339,10 +400,12 @@ function onMessage(f) {
     if (S.run && !S.run.rings.length) { const r = ring(); paint(r, S.run.state, S.level); S.run.rings.push(r); node.gutter.append(r); }
     if (!node.el.isConnected) appendBlock(node.el);
   }
-  const stick = atBottom();
+  S.turn ??= newTurn(Date.now(), true);
+  let item = S.turn.items.find((x) => x.id === f.messageId);
+  if (!item) S.turn.items.push((item = { id: f.messageId, node }));
+  item.m = m;
   node.last = m;
-  fillAssistant(node.body, m, f.messageId);
-  if (stick) scroller.scrollTop = scroller.scrollHeight;
+  renderTurn(S.turn);
   const ev = f.assistantMessageEvent?.type ?? "";
   if (S.run && !S.run.end) {
     if (ev.startsWith("thinking_") && ev !== "thinking_end") setRing("think");
@@ -364,25 +427,35 @@ function onToolEnd(f) {
 function renderHistory(messages) {
   const results = {};
   for (const m of messages) if (m.role === "toolResult") results[m.toolCallId] = m;
-  let first = true, n = 0;
+  const turns = [];
+  let turn = null, n = 0;
   const frag = document.createDocumentFragment();
   for (const m of messages) {
-    if (m.role === "user") { frag.append(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content)))); first = true; n++; if (!S.title) setTitle(textOf(m.content).slice(0, 60)); }
-    else if (m.role === "assistant") {
-      const node = assistantNode(`h${n}`, m); n++;
+    if (m.role === "user") {
+      frag.append(h("div", { class: "msg user" }, h("div", { class: "bubble" }, textOf(m.content))));
+      turn = newTurn(m.timestamp ?? 0, false);
+      turns.push(turn);
+      n++;
+      if (!S.title) setTitle(textOf(m.content).slice(0, 60));
+    } else if (m.role === "assistant") {
+      const id = `h${n++}`;
+      const node = assistantNode(id, m);
       for (const c of m.content ?? []) if (c.type === "toolCall") S.tools[c.id] = { call: c, result: results[c.id] ?? null, card: h("details", { class: "tool" }) };
       node.last = m;
-      fillAssistant(node.body, m, `h${n}`);
-      if (first) {
-        first = false;
+      if (!turn) { turn = newTurn(m.timestamp ?? 0, false); turns.push(turn); }
+      if (!turn.items.length) {
         const r = ring();
         paint(r, m.stopReason === "error" ? "fail" : "idle", S.level);
         node.gutter.append(r);
       }
+      turn.items.push({ id, node, m });
+      const c = m.content ?? [];
+      if (c.some((x) => x.type === "text" && x.text) && !c.some((x) => x.type === "toolCall")) turn.t1 = m.timestamp ?? turn.t0;
       frag.append(node.el);
     }
   }
   transcript.replaceChildren(frag);
+  for (const t of turns) renderTurn(t);
   setHasMsgs(n > 0);
   scroller.scrollTop = scroller.scrollHeight;
 }
@@ -390,7 +463,7 @@ function renderHistory(messages) {
 async function loadSession() {
   try {
     const data = await rpc({ type: "get_messages" });
-    S.tools = {}; S.msgs = {}; S.chainOpen = {};
+    S.tools = {}; S.msgs = {}; S.chainOpen = {}; S.turn = null;
     setTitle("");
     renderHistory(data?.messages ?? data ?? []);
   } catch (e) { toast(String(e.message ?? e)); }
@@ -501,6 +574,7 @@ function showPending(text) {
   S.streaming = true;
   document.body.classList.add("running");
   S.run = { state: "work", level: S.level, rings: [] };
+  S.turn = newTurn(Date.now(), true);
   const node = assistantNode("pending", {});
   const r = ring();
   paint(r, "work", S.level);
@@ -523,7 +597,7 @@ function dropPending(p, withUser) {
   discardPlaceholder();
   if (withUser) { p.user.remove(); if (!transcript.children.length) setHasMsgs(false); }
   S.streaming = false;
-  S.run = null;
+  S.run = null; S.turn = null;
   document.body.classList.remove("running");
   setRing("idle");
 }
