@@ -261,6 +261,25 @@ test("remoteApi GET reads {allowed, enabled} with a Bearer credential", async ()
   expect(http.requests).toEqual([{ method: "GET", path: "/api/device/remote", auth: "Bearer s3cret", contentType: null, body: "" }]);
 });
 
+test("remoteApi sends its request through the account's proxy", async () => {
+  // An http proxy receives the request with the absolute target URL; the origin itself is never contacted.
+  const seen: { url: string; auth: string | null }[] = [];
+  const proxy = Bun.serve({
+    port: 0,
+    fetch(req) {
+      seen.push({ url: req.url, auth: req.headers.get("authorization") });
+      return Response.json({ success: true, data: { allowed: true, enabled: true } });
+    },
+  });
+  try {
+    const r = await remoteApi({ baseUrl: "http://localhost:9", clientSecret: "s3cret", proxy: `http://127.0.0.1:${proxy.port}` });
+    expect(r).toEqual({ allowed: true, enabled: true });
+    expect(seen).toEqual([{ url: "http://localhost:9/api/device/remote", auth: "Bearer s3cret" }]);
+  } finally {
+    proxy.stop(true);
+  }
+});
+
 test("remoteApi PUT sends {enabled} as JSON and returns the new state", async () => {
   const http = startHttp(() => Response.json({ success: true, data: { allowed: true, enabled: true } }));
   expect(await remoteApi({ baseUrl: http.baseUrl, clientSecret: "s3cret" }, true)).toEqual({ allowed: true, enabled: true });

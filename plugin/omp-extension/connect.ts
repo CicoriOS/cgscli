@@ -90,6 +90,8 @@ export interface ConnectOptions {
   deviceName?: string;
   now?: () => number;
   readAccount?: (agentDir: string) => Account | null;
+  /** The API origin that currently answers: the account's logical origin may be unreachable from here (ADR 0029). Default: the account's own. */
+  origin?: () => Promise<string>;
 }
 
 export const remoteStateFile = (agentDir: string) => path.join(agentDir, "cgs", "remote.json");
@@ -289,11 +291,12 @@ export function createConnect(o: ConnectOptions): Connect {
   async function ready(a: Account): Promise<UnitPort> {
     unit ??= open(file).catch((e) => { unit = undefined; throw e; });
     const port = await unit;
-    const proxy = proxyFor(new URL(a.baseUrl), env);
+    const baseUrl = o.origin ? await o.origin() : a.baseUrl;
+    const proxy = proxyFor(new URL(baseUrl), env);
     const childEnv: Record<string, string> = {};
     for (const [k, v] of Object.entries(env)) if (v !== undefined) childEnv[k] = v;
     await port.call("configure", {
-      baseUrl: a.baseUrl,
+      baseUrl,
       clientSecret: a.clientSecret,
       deviceName: (o.deviceName ?? os.hostname() ?? "unknown").slice(0, 64),
       agentDir: o.agentDir,

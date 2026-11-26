@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Host, SocketHandlers } from "../../../src/remote/host/index.ts";
-import type { RelayCallbacks } from "../../../src/remote/daemon/relay.ts";
+import type { RelayAccount, RelayCallbacks } from "../../../src/remote/daemon/relay.ts";
 import { RemoteUnit, type Configure, type Link, type UnitDeps } from "../../../src/remote/daemon/unit.ts";
 import { BrowserSession, createPasswordVerifier, type BrowserStore, type PasswordVerifier, type SavedBrowser, type Step, type WireMessage } from "../../../src/remote/wire/index.ts";
 
@@ -73,7 +73,7 @@ interface World {
   unit: RemoteUnit;
   links: FakeLink[];
   host: FakeHost;
-  api: { calls: (boolean | undefined)[]; refuse: boolean };
+  api: { calls: (boolean | undefined)[]; accounts: RelayAccount[]; refuse: boolean };
   clock: { now: number };
   file: string;
 }
@@ -89,7 +89,7 @@ async function world(file?: string): Promise<World> {
   const stateFile = file ?? path.join(dir, "remote.json");
   const links: FakeLink[] = [];
   const host = new FakeHost();
-  const api = { calls: [] as (boolean | undefined)[], refuse: false };
+  const api = { calls: [] as (boolean | undefined)[], accounts: [] as RelayAccount[], refuse: false };
   const clock = { now: 1_000_000 };
   const deps: UnitDeps = {
     file: stateFile,
@@ -99,8 +99,9 @@ async function world(file?: string): Promise<World> {
       links.push(link);
       return link;
     },
-    api: async (_account, enabled) => {
+    api: async (account, enabled) => {
       api.calls.push(enabled);
+      api.accounts.push(account);
       if (enabled === true && api.refuse) throw new Error("remote_not_allowed");
       return { allowed: !api.refuse, enabled: enabled ?? false };
     },
@@ -214,6 +215,26 @@ test("a live terminal uses its lease and the wire revokes the browser, not the r
   expect(writes.length).toBe(count);
   await w.unit.disable();
   expect(closed).toBe(true);
+});
+
+describe("the proxy", () => {
+  test("every call to the server carries the proxy configured for the account", async () => {
+    const w = await world();
+    const proxy = "http://127.0.0.1:10808";
+    await w.unit.configure({ ...CFG, proxy });
+    await w.unit.entitlement();
+    await w.unit.setPassword(PASSWORD);
+    await w.unit.enable();
+    expect(w.api.accounts.length).toBeGreaterThanOrEqual(2);
+    expect(w.api.accounts.every((a) => a.proxy === proxy)).toBe(true);
+  });
+
+  test("without a proxy the account carries none", async () => {
+    const w = await world();
+    await w.unit.configure(CFG);
+    await w.unit.entitlement();
+    expect(w.api.accounts[0]).toEqual({ baseUrl: CFG.baseUrl, clientSecret: CFG.clientSecret });
+  });
 });
 
 describe("the device switch", () => {

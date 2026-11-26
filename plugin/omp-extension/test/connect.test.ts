@@ -67,6 +67,35 @@ test("the first /connect checks the entitlement, asks the password twice masked,
   expect(u.notes.at(-1)).toContain("🦊 🌲");
 });
 
+async function proxyOf(env: NodeJS.ProcessEnv, origin = "https://cgs.example"): Promise<string | undefined> {
+  const unit = fakeUnit(status());
+  const c = createConnect({ agentDir: agentDir(), openUnit: async () => unit.port, env, origin: async () => origin });
+  await c.run("", ui(["pw pw pw pw", "pw pw pw pw"]).ctx);
+  // The fake unit records `configure` params as unknown; the test reads only the proxy field the connector wrote.
+  const params = unit.calls[0]!.params as { proxy?: string };
+  return params.proxy;
+}
+
+test("the unit's proxy comes from the user's environment, like the router's (ADR 0029)", async () => {
+  expect(await proxyOf({ https_proxy: "http://127.0.0.1:10808" })).toBe("http://127.0.0.1:10808");
+  expect(await proxyOf({ HTTPS_PROXY: "http://p:1", ALL_PROXY: "http://q:2" })).toBe("http://p:1");
+  expect(await proxyOf({ ALL_PROXY: "http://q:2" })).toBe("http://q:2");
+  expect(await proxyOf({ PI_PROXY: "http://pi:3", HTTPS_PROXY: "http://p:1" })).toBe("http://pi:3");
+  expect(await proxyOf({})).toBeUndefined();
+});
+
+test("the proxy is judged against the origin the router selected, and NO_PROXY opts it out", async () => {
+  expect(await proxyOf({ https_proxy: "http://p:1", NO_PROXY: "reachable.example" }, "https://reachable.example")).toBeUndefined();
+  expect(await proxyOf({ https_proxy: "http://p:1", NO_PROXY: "cgs.example" }, "https://reachable.example")).toBe("http://p:1");
+});
+
+test("the unit is configured with the origin the router selected, not the account's logical one", async () => {
+  const unit = fakeUnit(status());
+  const c = createConnect({ agentDir: agentDir(), openUnit: async () => unit.port, env: {}, origin: async () => "https://reachable.example" });
+  await c.run("", ui(["pw pw pw pw", "pw pw pw pw"]).ctx);
+  expect(unit.calls[0]!.params).toMatchObject({ baseUrl: "https://reachable.example", clientSecret: "secret" });
+});
+
 test("an account without the entitlement gets a refusal and no password prompt", async () => {
   const unit = fakeUnit(status(), false);
   const c = createConnect({ agentDir: agentDir(), openUnit: async () => unit.port, env: {} });

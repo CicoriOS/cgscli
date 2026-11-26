@@ -222,7 +222,7 @@ export default async function cgsExtension(pi: ExtensionApi & ConnectExtensionAp
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.
   const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
   pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
-  const remote = registerConnectCommand(pi, { agentDir });
+  const remote = registerConnectCommand(pi, { agentDir, origin: async () => { await connect.router.ready(); return connect.router.upstream(); } });
   registerAgentCommand(pi, { agentDir, fetch: (r) => connect.router.fetch(r) });
   divert((i, init) => connect.fetch(new Request(i, init)));
   // Register cached models and metadata immediately, then refresh them in the background.

@@ -232,7 +232,7 @@ export class RemoteUnit {
 
   #account(): RelayAccount {
     if (!this.#cfg) throw new Error("not_configured");
-    return { baseUrl: this.#cfg.baseUrl, clientSecret: this.#cfg.clientSecret };
+    return { baseUrl: this.#cfg.baseUrl, clientSecret: this.#cfg.clientSecret, ...(this.#cfg.proxy ? { proxy: this.#cfg.proxy } : {}) };
   }
 
   /** The session host is created on first use: a device nobody connects to never spawns an omp child. */
