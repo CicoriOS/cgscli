@@ -53,7 +53,7 @@ function paint(el, state, level) {
 const S = {
   ws: null, seq: 0, page: Math.random().toString(36).slice(2, 8), pending: new Map(), replaying: true, ready: Promise.withResolvers(),
   cwd: "", activeCwd: "", workspaces: [], expanded: {}, sessionFile: "", title: "",
-  model: null, level: "high", streaming: false,
+  model: null, level: "high", configured: "auto", streaming: false,
   run: null, // { state, ringEls: [] } the current prompt run
   msgs: {}, // messageId -> { el, body, ringHost }
   tools: {}, // toolCallId -> { card, call, result }
@@ -125,7 +125,7 @@ function onFrame(text) {
     case "bridge_restart": S.ready = Promise.withResolvers(); S.cwd = f.cwd; resetChat(); setRing("idle"); break;
     case "bridge_exit": toast(`omp exited (${f.exitCode})`); break;
     case "agent_start": S.streaming = true; startRun(); break;
-    case "thinking_level_changed": S.level = f.resolved ?? S.level; if (S.run?.state === "think") setRing("think"); break;
+    case "thinking_level_changed": S.level = f.resolved ?? S.level; S.configured = f.configured ?? S.configured; if (S.run?.state === "think") setRing("think"); break;
     case "model_changed": rpc({ type: "get_state" }).then(applyState).catch(() => {}); break;
     case "message_start": case "message_update": case "message_end": onMessage(f); break;
     case "tool_execution_start": onToolStart(f); break;
@@ -140,6 +140,7 @@ function onFrame(text) {
 function applyState(st) {
   S.model = st.model ?? S.model;
   S.level = st.thinkingLevel ?? S.level;
+  S.configured = st.configuredThinkingLevel ?? S.configured;
   S.sessionFile = st.sessionFile ?? "";
   S.streaming = !!st.isStreaming;
   document.body.classList.toggle("running", S.streaming);
@@ -474,7 +475,7 @@ function drawPopover(levels, picker) {
   showRows(picker);
   pop.replaceChildren(
     h("h4", {}, "Thinking"),
-    h("div", { class: "levels" }, levels.map((l) => h("button", { class: `lv${l === S.level ? " on" : ""}`, onclick: () => pickLevel(l) }, l))),
+    thinkingSlider(["auto", ...levels.filter((l) => l !== "auto")]),
     h("h4", {}, "Model"), search, rows);
   placePopover();
 }
@@ -485,8 +486,22 @@ function placePopover() {
   pop.style.left = `${Math.max(8, Math.min(b.right - w, innerWidth - w - 8))}px`;
   pop.style.top = `${above >= 8 ? above : Math.min(b.bottom + 8, Math.max(8, innerHeight - hgt - 8))}px`;
 }
+/** A stepped slider: Auto first (omp picks the effort per turn), then the levels the live model supports. */
+function thinkingSlider(steps) {
+  const at = Math.max(0, steps.indexOf(S.configured));
+  const name = h("b", {}, steps[at]);
+  const range = h("input", { type: "range", class: "slider", min: 0, max: steps.length - 1, step: 1, value: at, "aria-label": "Thinking effort" });
+  const tint = () => { range.style.accentColor = steps[range.value] === "auto" ? "#8a8a8a" : levelColor(steps[range.value]); };
+  tint();
+  range.addEventListener("input", () => { name.textContent = steps[range.value]; tint(); });
+  range.addEventListener("change", () => pickLevel(steps[range.value]));
+  return h("div", { class: "think" },
+    h("div", { class: "think-now" }, "Effort: ", name),
+    range,
+    h("div", { class: "ticks" }, steps.map((l) => h("span", {}, l === "auto" ? "Auto" : l))));
+}
 async function pickLevel(level) {
-  try { await rpc({ type: "set_thinking_level", level }); applyState(await rpc({ type: "get_state" })); pop.hidden = true; } catch (e) { toast(String(e.message ?? e)); }
+  try { await rpc({ type: "set_thinking_level", level }); applyState(await rpc({ type: "get_state" })); } catch (e) { toast(String(e.message ?? e)); }
 }
 async function pickModel(r) {
   try {
