@@ -1,0 +1,60 @@
+From 1c4dbe767d7822dff0bc6507656c936cd41dd45a Mon Sep 17 00:00:00 2001
+From: t <a@b.c>
+Date: Thu, 26 Nov 2026 12:55:49 +0800
+Subject: [PATCH 7/7] P14: RPC hosts opt in to session titles
+
+Reason: RPC hosts such as the web client and cgsconnect want omp-generated session titles.
+Upstream: none.
+Remove-when: upstream adds a host opt-in for automatic session title generation.
+---
+ docs/rpc.md                       | 10 +++++-----
+ packages/coding-agent/src/main.ts |  5 ++---
+ 2 files changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/docs/rpc.md b/docs/rpc.md
+index 5f4aa6835f..8e5f825caf 100644
+--- a/docs/rpc.md
++++ b/docs/rpc.md
+@@ -26,7 +26,7 @@ Behavior notes:
+ 
+ - `@file` CLI arguments are rejected in RPC mode.
+ - `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, dialogs resolve to their defaults, and extension presentation updates are dropped. With `rpc-ui`, tool UI such as `ask` remains enabled. With `rpc`, no UI requests are emitted except for a host-issued `login`. See [Extension UI Sub-Protocol](#extension-ui-sub-protocol) for the exact boundaries.
+-- CLI RPC modes disable automatic session title generation (`PI_NO_TITLE=1`) to avoid an extra model call. `rpc-ui` also sets `PI_NO_PTY=1`.
++- By default, `rpc`, `rpc-ui`, and `acp` disable automatic session title generation (`PI_NO_TITLE=1`) to avoid an extra model call. Hosts can set `PI_RPC_TITLE=1` to opt in; `--no-title` still takes precedence. `rpc-ui` also sets `PI_NO_PTY=1`.
+ - RPC/ACP pin neutral defaults for settings declaring the corresponding `protocolDefault`, including task isolation/execution, memory, advisor, and advisor tier settings. RPC additionally pins async-job and bash/eval auto-background defaults. Explicit project/global config, `--config`, and isolated settings remain authoritative; on-disk config changes are watched in long-lived CLI RPC processes. Todo settings are not host-defaulted.
+ - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
+ - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
+@@ -1367,10 +1367,10 @@ Use `--mode rpc --no-ui` for a host without a tool UI surface; use `--mode rpc-u
+ 
+ Runtime note:
+ 
+-- Automatic session title generation is disabled in RPC mode, and `setTitle` UI
+-  requests are also suppressed by default because most hosts do not have a
+-  meaningful terminal-title surface. Set `PI_RPC_EMIT_TITLE=1` to opt back in to
+-  the UI event only.
++- Automatic session title generation is disabled in RPC mode unless the host
++  sets `PI_RPC_TITLE=1`. Separately, `setTitle` UI requests are suppressed by
++  default because most hosts do not have a meaningful terminal-title surface.
++  Set `PI_RPC_EMIT_TITLE=1` to opt in to the UI event.
+ 
+ Example:
+ 
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index 7136856262..429fa8efea 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -2185,9 +2185,8 @@ export async function runRootCommand(
+ 		}
+ 		if (
+ 			parsedArgs.noTitle ||
+-			parsedArgs.mode === "rpc" ||
+-			parsedArgs.mode === "rpc-ui" ||
+-			parsedArgs.mode === "acp"
++			((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "acp") &&
++				!Bun.env.PI_RPC_TITLE)
+ 		) {
+ 			Bun.env.PI_NO_TITLE = "1";
+ 		}
+-- 
+2.47.3
+
