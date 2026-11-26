@@ -166,7 +166,8 @@ function onPromptResult(f) {
   const end = f.status === "error" ? "fail" : "idle"; // a plain reply fades back to grey; green is for tool calls
   if (S.run) { S.run.level = S.level; }
   if (S.run) { for (const r of S.run.rings) paint(r, end, S.level); S.run.end = end; }
-  if (f.status === "error" && f.error?.message) addError(f.error.message);
+  const shown = S.turn?.items.some((it) => it.m?.stopReason === "error" && it.m.errorMessage); // the message already carries it
+  if (f.status === "error" && f.error?.message && !shown) addError(f.error.message);
 }
 function onSettled() {
   S.streaming = false;
@@ -206,31 +207,121 @@ function addError(text) { appendBlock(h("div", { class: "errline" }, text)); }
 
 const textOf = (c) => (typeof c === "string" ? c : (c ?? []).map((p) => (p?.type === "text" ? p.text : "")).join(""));
 
-/** Tiny safe markdown: fenced code, headings, lists, paragraphs, inline code/bold/links. */
+const mermaidCache = {}; // source -> { busy } | { svg } | { error }
+let mermaidLoad, mermaidSeq = 0;
+
+/** Mermaid's bundle is optional (the bridge serves /mermaid.min.js when MERMAID_JS is set). */
+function loadMermaid() {
+  mermaidLoad ??= new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/mermaid.min.js";
+    s.onload = () => { window.mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "neutral" }); resolve(window.mermaid); };
+    s.onerror = () => reject(new Error("mermaid is not available on this bridge (set MERMAID_JS)"));
+    document.head.append(s);
+  });
+  return mermaidLoad;
+}
+
+function fillMermaid(box) {
+  const c = mermaidCache[box.dataset.src];
+  if (c?.svg) { box.className = "mermaid-box"; box.innerHTML = c.svg; }
+  else if (c?.error) { box.className = "mermaid-box failed"; box.append(h("div", { class: "mm-err" }, c.error)); }
+}
+
+async function renderMermaid(src) {
+  mermaidCache[src] = { busy: true };
+  const id = `mm${++mermaidSeq}`;
+  try {
+    const lib = await loadMermaid();
+    mermaidCache[src] = { svg: (await lib.render(id, src)).svg };
+  } catch (e) {
+    document.getElementById(`d${id}`)?.remove();
+    mermaidCache[src] = { error: String(e.message ?? e).split("\n")[0] };
+  }
+  for (const box of document.querySelectorAll(".mermaid-box.pending")) if (box.dataset.src === src) fillMermaid(box);
+}
+
+function diagramHtml(src) {
+  const c = mermaidCache[src];
+  if (c?.svg) return `<div class="mermaid-box">${c.svg}</div>`;
+  if (!c) renderMermaid(src);
+  return `<div class="mermaid-box pending${c?.error ? " failed" : ""}" data-src="${esc(src)}"><pre><code>${esc(src)}</code></pre>${c?.error ? `<div class="mm-err">${esc(c.error)}</div>` : ""}</div>`;
+}
+
+const mdInline = (s) => {
+  const codes = [];
+  const t = esc(s).replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/~~([^~\n]+)~~/g, "<del>$1</del>")
+    .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?![*\w])/g, "$1<em>$2</em>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
+  return t.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
+};
+
+const MD_LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+const MD_RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
+const MD_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+const mdCells = (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+
+function mdBlockStart(lines, i) {
+  const l = lines[i];
+  return /^(```|#{1,6}\s|>)/.test(l) || MD_LIST.test(l) || MD_RULE.test(l) || (l.includes("|") && i + 1 < lines.length && MD_TABLE_SEP.test(lines[i + 1]));
+}
+
+function mdList(lines, i) {
+  const first = MD_LIST.exec(lines[i]);
+  const base = first[1].length, ordered = /\d/.test(first[2]);
+  const items = [];
+  while (i < lines.length) {
+    const m = MD_LIST.exec(lines[i]);
+    if (!m || m[1].length < base) break;
+    if (m[1].length > base) { const [html, next] = mdList(lines, i); items[items.length - 1] += html; i = next; continue; }
+    const task = /^\[([ xX])\]\s+(.*)$/.exec(m[3]);
+    items.push(task ? `<input type="checkbox" disabled${task[1] === " " ? "" : " checked"}> ${mdInline(task[2])}` : mdInline(m[3]));
+    i++;
+  }
+  const tag = ordered ? "ol" : "ul";
+  return [`<${tag}>${items.map((x) => `<li${x.startsWith("<input") ? ' class="task"' : ""}>${x}</li>`).join("")}</${tag}>`, i];
+}
+
+/** Safe markdown (no raw HTML): headings, paragraphs, emphasis, links, lists (nested, tasks), tables, quotes, rules, code, mermaid and svg fences. */
 function md(src) {
   const out = [];
   const lines = src.replace(/\r/g, "").split("\n");
-  const inline = (s) => esc(s)
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer noopener">$1</a>');
   for (let i = 0; i < lines.length;) {
     const line = lines[i];
     const fence = /^```(\S*)/.exec(line);
+    const head = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
     if (fence) {
       const code = [];
       for (i++; i < lines.length && !lines[i].startsWith("```"); i++) code.push(lines[i]);
+      const closed = i < lines.length; // a fence still streaming stays plain code
       i++;
-      out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
-    } else if (/^#{1,6}\s/.test(line)) {
-      out.push(`<h3>${inline(line.replace(/^#+\s*/, ""))}</h3>`); i++;
-    } else if (/^\s*([-*]|\d+\.)\s/.test(line)) {
-      const ordered = /^\s*\d+\./.test(line), items = [];
-      for (; i < lines.length && /^\s*([-*]|\d+\.)\s/.test(lines[i]); i++) items.push(`<li>${inline(lines[i].replace(/^\s*([-*]|\d+\.)\s+/, ""))}</li>`);
-      out.push(`<${ordered ? "ol" : "ul"}>${items.join("")}</${ordered ? "ol" : "ul"}>`);
+      const body = code.join("\n"), lang = fence[1].toLowerCase();
+      if (closed && lang === "mermaid") out.push(diagramHtml(body));
+      else if (closed && lang === "svg") out.push(`<div class="svg-box"><img alt="svg" src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(body)}"></div>`);
+      else out.push(`<pre><code>${esc(body)}</code></pre>`);
+    } else if (head) {
+      out.push(`<h${head[1].length}>${mdInline(head[2])}</h${head[1].length}>`); i++;
+    } else if (MD_RULE.test(line)) {
+      out.push("<hr>"); i++;
+    } else if (line.startsWith(">")) {
+      const q = [];
+      for (; i < lines.length && lines[i].startsWith(">"); i++) q.push(lines[i].replace(/^>\s?/, ""));
+      out.push(`<blockquote>${md(q.join("\n"))}</blockquote>`);
+    } else if (line.includes("|") && i + 1 < lines.length && MD_TABLE_SEP.test(lines[i + 1])) {
+      const align = mdCells(lines[i + 1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : ""));
+      const cell = (tag, c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ""}>${mdInline(c)}</${tag}>`;
+      const th = mdCells(line).map((c, k) => cell("th", c, k)).join("");
+      const rows = [];
+      for (i += 2; i < lines.length && lines[i].trim() && lines[i].includes("|"); i++) rows.push(`<tr>${mdCells(lines[i]).map((c, k) => cell("td", c, k)).join("")}</tr>`);
+      out.push(`<div class="tbl"><table><thead><tr>${th}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`);
+    } else if (MD_LIST.test(line)) {
+      const [html, next] = mdList(lines, i);
+      out.push(html); i = next;
     } else if (!line.trim()) { i++; } else {
       const para = [];
-      for (; i < lines.length && lines[i].trim() && !/^(```|#{1,6}\s|\s*([-*]|\d+\.)\s)/.test(lines[i]); i++) para.push(inline(lines[i]));
+      for (; i < lines.length && lines[i].trim() && (!para.length || !mdBlockStart(lines, i)); i++) para.push(mdInline(lines[i]));
       out.push(`<p>${para.join("<br>")}</p>`);
     }
   }

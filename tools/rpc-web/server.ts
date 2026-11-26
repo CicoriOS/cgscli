@@ -167,6 +167,10 @@ const server = Bun.serve({
     const route = new URL(req.url).pathname;
     if (route === "/ws") return srv.upgrade(req) ? undefined : new Response("upgrade failed", { status: 400 });
     if (route.startsWith("/api/")) return api(req, route);
+    if (route === "/mermaid.min.js") { // optional: mermaid's browser bundle (MERMAID_JS); without it diagrams stay as source
+      const file = Bun.file(process.env.MERMAID_JS ?? "");
+      return process.env.MERMAID_JS && (await file.exists()) ? new Response(file, { headers: { "content-type": "text/javascript; charset=utf-8" } }) : new Response("not found", { status: 404 });
+    }
     const asset = STATIC[route];
     if (!asset) return new Response("not found", { status: 404 });
     return new Response(Bun.file(path.join(here, asset[0])), { headers: { "content-type": asset[1], "cache-control": "no-store" } });
