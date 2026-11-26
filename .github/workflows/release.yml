@@ -31,6 +31,9 @@ jobs:
           bun scripts/pack-release.ts "${tag##*-cgs.}" --out-dir "$RUNNER_TEMP/release"
           test -f "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz"
           mkdir release && cp "$RUNNER_TEMP/release/cicori-cgs-${tag#v}.tgz" release/
+      - name: Smoke test the tarball
+        # Installs it like a user and runs the real cgs: the extension loader, not Bun alone, decides how vendored libraries load.
+        run: bun scripts/smoke-release.ts "release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz"
       - uses: actions/upload-artifact@v4
         with:
           name: tarball
@@ -58,7 +61,7 @@ jobs:
         run: |
           npm install -g npm@latest
           npm --version
-          npm publish "release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz" --access public --provenance --tag latest
+          npm publish "./release/cicori-cgs-${GITHUB_REF_NAME#v}.tgz" --access public --provenance --tag latest
       - name: Attach the tarball to the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

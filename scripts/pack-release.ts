@@ -77,12 +77,12 @@ async function stageExtension(stage: string) {
         if (name === "yaml" || name.startsWith("@noble/")) {
           target = vendor[specifier];
           if (!target) {
-            const out = `${Object.keys(vendor).length}.${name === "yaml" ? "cjs" : "js"}`;
+            const out = `${Object.keys(vendor).length}.js`;
             target = vendor[specifier] = `vendor/${out}`;
             const entry = fileURLToPath(import.meta.resolve(specifier));
             const result = await Bun.build({
               entrypoints: [entry], target: "bun", outdir: path.join(stage, "vendor"), naming: out,
-              format: name === "yaml" ? "cjs" : "esm",
+              format: "esm",
             });
             if (!result.success) throw new Error(`Failed to bundle ${specifier}: ${result.logs.join("\n")}`);
             if (!vendorLicenses.has(name)) {

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import YAML from "yaml";
+import * as YAML from "yaml";
 import { createConnect, applyDefaultLayout, normalizeLayout, seedDistributionDefaults, DISABLED_PROVIDERS, resolveAgentDir } from "@cgscli/connect";
 import { credentialsPath, fetchModelCapabilities, readAccount } from "../account.ts";
 import { registerAgentCommand, syncAccount } from "../index.ts";
