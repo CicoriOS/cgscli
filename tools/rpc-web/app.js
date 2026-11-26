@@ -475,7 +475,7 @@ function drawPopover(levels, picker) {
   showRows(picker);
   pop.replaceChildren(
     h("h4", {}, "Thinking"),
-    thinkingSlider(["auto", ...levels.filter((l) => l !== "auto")]),
+    thinkingSlider(["off", "auto", ...levels.filter((l) => l !== "off" && l !== "auto")]),
     h("h4", {}, "Model"), search, rows);
   placePopover();
 }
@@ -486,7 +486,7 @@ function placePopover() {
   pop.style.left = `${Math.max(8, Math.min(b.right - w, innerWidth - w - 8))}px`;
   pop.style.top = `${above >= 8 ? above : Math.min(b.bottom + 8, Math.max(8, innerHeight - hgt - 8))}px`;
 }
-/** A stepped slider: Auto first (omp picks the effort per turn), then the levels the live model supports. */
+/** A stepped slider: Off, then Auto (omp picks the effort per turn), then the efforts the live model offers, low to high. */
 function thinkingSlider(steps) {
   const at = Math.max(0, steps.indexOf(S.configured));
   const name = h("b", {}, steps[at]);
