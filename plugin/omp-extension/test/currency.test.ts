@@ -45,9 +45,9 @@ test("omp is told the prefix, and only when the relay named a currency", () => {
 
 test("the stored account keeps the currency, so the first screen after a restart already uses it", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cgs-cur-"));
-  writeAccount(dir, { baseUrl: "http://s", clientSecret: "k", models: [], pricing: {}, currency: { code: "CUSTOM", symbol: "🐱", prefix: "🐱 " } });
+  writeAccount(dir, { baseUrl: "http://s", clientSecret: "k", models: [], pricing: {}, capabilities: {}, currency: { code: "CUSTOM", symbol: "🐱", prefix: "🐱 " } });
   expect(readAccount(dir)!.currency).toEqual({ code: "CUSTOM", symbol: "🐱", prefix: "🐱 " });
-  writeAccount(dir, { baseUrl: "http://s", clientSecret: "k", models: [], pricing: {} });
+  writeAccount(dir, { baseUrl: "http://s", clientSecret: "k", models: [], pricing: {}, capabilities: {} });
   expect(readAccount(dir)!.currency).toBeUndefined();
   fs.rmSync(dir, { recursive: true, force: true });
 });

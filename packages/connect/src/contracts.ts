@@ -9,8 +9,11 @@ export interface Router {
   clearTunnel(): void;
 }
 
+export type InputModality = "text" | "image" | "audio" | "video" | "pdf";
+export type ModelCapabilities = Record<string, { input: InputModality[]; thinking_levels?: string[]; source?: string }>;
+
 export interface ModelEntry {
-  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ("text" | "image")[];
+  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: InputModality[];
   price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 export interface ModelManifest { providers: { id: string; channel: string; baseUrl: string; models: ModelEntry[] }[] }

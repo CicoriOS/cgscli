@@ -1,10 +1,8 @@
-// Account state of the CGS extension: the stored client credential, the model list and prices fetched with it, and the
-// environment variables the channels' `apiKey` names. Ported from the legacy plugin/omp-cgs (credentials.json,
-// fetchModelIds, fetchPricing). Server calls leave through the cgsconnect router; the channels are registered from the
-// provider hub's manifest, so models and prices reach omp the same way for a fresh login and for a restart.
+// Account state of the CGS extension: the stored client credential and the model list, prices and capabilities fetched
+// with it. Server calls leave through the cgsconnect router; the provider hub's manifest feeds omp on login and restart.
 import fs from "node:fs";
 import path from "node:path";
-import type { SitePrice } from "@cgscli/connect";
+import type { InputModality, ModelCapabilities, SitePrice } from "@cgscli/connect";
 
 /** Environment variables the channels' `apiKey` names; omp resolves them on every request, so a re-login needs no restart. */
 export const SECRET_ENV = "CGS_CLIENT_SECRET";
@@ -16,9 +14,10 @@ export interface Account {
   clientSecret: string;
   username?: string;
   tier?: string;
-  /** Last model ids / prices the server returned: registered at once on the next start, refreshed in the background. */
+  /** Last model ids, prices and capabilities the server returned: registered at once on restart. */
   models: string[];
   pricing: Record<string, SitePrice>;
+  capabilities: ModelCapabilities;
   /** The relay's display currency as last fetched: prices and amounts are in it. */
   currency?: Currency;
 }
@@ -38,6 +37,7 @@ export function readAccount(agentDir: string): Account | null {
     ...(typeof o.tier === "string" ? { tier: o.tier } : {}),
     models: Array.isArray(o.models) ? o.models.filter((m): m is string => typeof m === "string" && m !== "") : [],
     pricing,
+    capabilities: parseModelCapabilities(o.capabilities) ?? {},
     ...(parseCurrency(o.currency) ? { currency: parseCurrency(o.currency)! } : {}),
   };
 }
@@ -117,5 +117,38 @@ export async function fetchPricing(via: Via, baseUrl: string, secret: string, si
     const d = body?.data;
     if (body?.success !== true || !d || !d.models || typeof d.models !== "object") return null;
     return { models: d.models as Record<string, SitePrice>, currency: parseCurrency(d) };
+  } catch { return null; }
+}
+
+const INPUT_MODALITIES: Record<InputModality, true> = { text: true, image: true, audio: true, video: true, pdf: true };
+
+function parseModelCapabilities(value: unknown): ModelCapabilities | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const models: ModelCapabilities = Object.create(null);
+  for (const [id, entry] of Object.entries(value)) {
+    if (!id.trim() || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const { input, thinking_levels, source } = entry as Record<string, unknown>;
+    if (!Array.isArray(input)) continue;
+    const modalities = new Set<InputModality>(["text"]);
+    for (const modality of input) {
+      if (typeof modality === "string" && Object.hasOwn(INPUT_MODALITIES, modality)) modalities.add(modality as InputModality);
+    }
+    const levels = Array.isArray(thinking_levels) ? thinking_levels.filter((level): level is string => typeof level === "string") : [];
+    models[id] = {
+      input: [...modalities],
+      ...(levels.length ? { thinking_levels: levels } : {}),
+      ...(typeof source === "string" ? { source } : {}),
+    };
+  }
+  return models;
+}
+
+/** GET <baseUrl>/api/device/models. Best effort: null on failure, including on servers without the endpoint. */
+export async function fetchModelCapabilities(via: Via, baseUrl: string, secret: string, signal?: AbortSignal): Promise<ModelCapabilities | null> {
+  try {
+    const res = await via(new Request(`${baseUrl.replace(/\/+$/, "")}/api/device/models`, { headers: headers(secret), signal: signal ?? AbortSignal.timeout(10_000) }));
+    if (!res.ok) return null;
+    const body = (await res.json()) as { success?: unknown; data?: { models?: unknown } } | null;
+    return body?.success === true ? parseModelCapabilities(body.data?.models) : null;
   } catch { return null; }
 }

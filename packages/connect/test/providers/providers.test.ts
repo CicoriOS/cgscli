@@ -18,14 +18,22 @@ test("channel routing and manifest: non-chat ids dropped, prices mapped, base UR
   expect(m.providers[0]!.models[0]!.price).toEqual({ input: 21, output: 105, cacheRead: 2, cacheWrite: 0 });
 });
 
-test("models declare picture input by family, and the extension registers it (omp drops pictures for text-only models)", async () => {
-  const m = buildManifest("http://x", ["claude-a", "gemini-3-pro", "gpt-5", "deepseek-v4.1-flash", "glm-5"]);
+test("the manifest uses declared inputs, not model families, and defaults to text", () => {
+  const ids = ["claude-a", "gpt-5", "deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5"];
+  const m = buildManifest("http://x", ids, {}, { "deepseek-v4.1-flash": { input: ["text", "image"] }, "glm-5": { input: ["text", "pdf"] } });
   const input = Object.fromEntries(m.providers.flatMap((p) => p.models.map((x) => [x.id, x.input])));
-  expect(input).toEqual({ "claude-a": ["text", "image"], "gemini-3-pro": ["text", "image"], "gpt-5": ["text", "image"], "deepseek-v4.1-flash": ["text", "image"], "glm-5": ["text"] });
-  const hub = createProviderHub({ router: router(), models: ["deepseek-v4.1-flash", "glm-5"] });
-  const reg: Record<string, any> = {};
+  expect(input).toEqual({ "claude-a": ["text"], "gpt-5": ["text"], "deepseek-v4.1-flash": ["text", "image"], "deepseek-v4-pro": ["text"], "glm-5": ["text", "pdf"] });
+  expect(buildManifest("http://x", ids).providers.flatMap((p) => p.models.map((x) => x.input))).toEqual(ids.map(() => ["text"]));
+});
+
+test("the extension registers the input modalities served by the hub manifest", async () => {
+  const hub = createProviderHub({ router: router(), models: ["deepseek-v4.1-flash", "deepseek-v4-pro"], capabilities: { "deepseek-v4.1-flash": { input: ["text", "image", "audio", "video", "pdf"] } } });
+  const reg: Record<string, Record<string, unknown>> = {};
   await registerChannels({ registerProvider: (n, c) => void (reg[n] = c), registerCommand: () => {} }, (i, init) => hub.fetch(new Request(i, init)));
-  expect(Object.fromEntries(reg["cgs-openai"].models.map((x: any) => [x.id, x.input]))).toEqual({ "deepseek-v4.1-flash": ["text", "image"], "glm-5": ["text"] });
+  expect(reg["cgs-openai"]?.models).toMatchObject([
+    { id: "deepseek-v4.1-flash", input: ["text", "image", "audio", "video", "pdf"] },
+    { id: "deepseek-v4-pro", input: ["text"] },
+  ]);
 });
 
 test("channelOfPath: the channel and the upstream path, null for anything else", () => {

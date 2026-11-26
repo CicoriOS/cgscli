@@ -1,8 +1,8 @@
 import os from "node:os";
 import path from "node:path";
-import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, applyCurrencyEnv, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
+import { ANTIGRAVITY_KEY_ENV, applyCredentialEnv, applyCurrencyEnv, fetchModelCapabilities, fetchModelIds, fetchPricing, readAccount, SECRET_ENV, writeAccount } from "./account.ts";
 import { deviceLogin } from "./login.ts";
-import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type LayoutResult, type ProviderHubImpl } from "@cgscli/connect";
+import { applyDefaultLayout, CGSCONNECT_ORIGIN, CHANNELS, createConnect, resolveAgentDir, type LayoutResult, type ModelManifest, type ProviderHubImpl } from "@cgscli/connect";
 import { candidatesFrom, cloudflareFrom, logicalOrigin } from "./defaults.ts";
 import { createUsageProvider } from "./usage.ts";
 import { registerRemoteCommands } from "./remote.ts";
@@ -17,11 +17,6 @@ import { registerUnknownToolGuidance } from "./unknown-tool.ts";
 // (packages/coding-agent/src/extensibility/extensions/types.ts). With `oauth` registered, a stored login credential
 // takes precedence over `apiKey` (docs/extensions.md), which is what lets omp rotate between sibling slots.
 
-interface ManifestModel {
-  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: ("text" | "image")[];
-  price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
-}
-interface ManifestProvider { id: string; channel: string; baseUrl: string; models: ManifestModel[] }
 interface OAuthCredentials { refresh: string; access: string; expires: number }
 
 interface CommandContext { ui: { notify(message: string, level?: "info" | "warning" | "error"): void } }
@@ -38,6 +33,7 @@ const API: Record<string, string> = {
   "cgs-openai": "openai-completions",
 };
 const LONG_LIVED_MS = 365 * 24 * 3600 * 1000;
+const ACCOUNT_SYNC_INTERVAL_MS = 30 * 60_000;
 
 async function getJson(via: FetchFn, url: string): Promise<unknown> {
   const r = await via(url, { signal: AbortSignal.timeout(8000) });
@@ -45,10 +41,10 @@ async function getJson(via: FetchFn, url: string): Promise<unknown> {
   return r.json();
 }
 
-function asManifest(v: unknown): ManifestProvider[] {
+function asManifest(v: unknown): ModelManifest["providers"] {
   const o = v && typeof v === "object" ? (v as { providers?: unknown }) : {};
   if (!Array.isArray(o.providers)) throw new Error("cgsconnect manifest malformed");
-  return o.providers as ManifestProvider[];
+  return o.providers;
 }
 
 interface LoginCallbacks {
@@ -64,7 +60,7 @@ export interface LoginRoute { ready(): Promise<void>; upstream(): string; fetch(
 
 /**
  * `/login` -> Cicori Good Service: device flow (page approval + polling) through the router. No server prompt (ADR 0015).
- * `onLoggedIn` runs after approval (model list, prices, layout); its error fails the login with a readable message.
+ * `onLoggedIn` syncs the account after approval; its error fails the login with a readable message.
  */
 export function cgsLoginProvider(route: LoginRoute, env: NodeJS.ProcessEnv = process.env, onLoggedIn?: (a: LoggedIn) => Promise<unknown>) {
   return {
@@ -138,24 +134,35 @@ export interface AccountSyncOptions {
   applyLayout?: typeof applyDefaultLayout;
 }
 
+let loggedMissingCapabilities = false;
+
 /**
- * Everything that follows a login or a start with a stored credential: put the credential where the channels' `apiKey`
- * points, fetch the model list and the prices through the router, hand them to the hub, re-register the channels (omp
- * picks the new models up without a restart), store the account, and apply the server default layout once.
+ * After login, at startup and periodically: fetch the account's models, prices and capabilities, then re-register the
+ * channels from the updated hub manifest. Store the account and follow the server's layout unless the user took over.
  * Throws a message fit to show the user when no model list can be had.
  */
 export async function syncAccount(o: AccountSyncOptions, a: LoggedIn): Promise<string[]> {
   const via = (r: Request) => o.connect.router.fetch(r);
   applyCredentialEnv(a.clientSecret);
-  const [ids, pricing] = await Promise.all([fetchModelIds(via, a.baseUrl, a.clientSecret), fetchPricing(via, a.baseUrl, a.clientSecret)]);
+  const [ids, pricing, declaredCapabilities] = await Promise.all([
+    fetchModelIds(via, a.baseUrl, a.clientSecret),
+    fetchPricing(via, a.baseUrl, a.clientSecret),
+    fetchModelCapabilities(via, a.baseUrl, a.clientSecret),
+  ]);
+  if (declaredCapabilities === null && !loggedMissingCapabilities) {
+    process.stderr.write("cgs: model capabilities unavailable from /api/device/models; registering text-only models\n");
+    loggedMissingCapabilities = true;
+  }
+  // Do not advertise stale modalities when the server no longer declares them.
+  const capabilities = declaredCapabilities ?? {};
   const prior = readAccount(o.agentDir);
   const prices = pricing?.models ?? prior?.pricing ?? {};
   // Prices and amounts are in the relay's display currency; omp prints it for the cgs-* models.
   const currency = pricing?.currency ?? prior?.currency;
   applyCurrencyEnv(currency);
-  o.connect.hub.setModels(ids, prices);
+  o.connect.hub.setModels(ids, prices, capabilities);
   await registerChannels(o.pi, (i, init) => o.connect.fetch(new Request(i, init)));
-  writeAccount(o.agentDir, { ...a, models: ids, pricing: prices, ...(currency ? { currency } : {}) });
+  writeAccount(o.agentDir, { ...a, models: ids, pricing: prices, capabilities, ...(currency ? { currency } : {}) });
   await (o.applyLayout ?? applyDefaultLayout)({ agentDir: o.agentDir, baseUrl: a.baseUrl, clientSecret: a.clientSecret, fetch: via });
   return ids;
 }
@@ -190,25 +197,39 @@ const SESSION_IDENTITY_HOOK = Symbol.for("cgscli.sessionIdentity");
 export default async function cgsExtension(pi: ExtensionApi): Promise<void> {
   const home = process.env.CGSCLI_HOME?.trim() || path.join(os.homedir(), ".cgs");
   const connect = createConnect({ upstream: candidatesFrom(), cloudflare: cloudflareFrom(), dataDir: path.join(home, "connect") });
-  process.once("exit", () => connect.stop());
   // omp patch P9 asks here for the wire session id of every cgs-* request (ADR 0022); a stock omp never asks.
   Reflect.set(globalThis, SESSION_IDENTITY_HOOK, (provider: string, sessionId: string) => connect.hub.sessionIdentity(provider, sessionId));
   registerUnknownToolGuidance();
   const agentDir = resolveAgentDir();
-  const sync = (a: LoggedIn) => syncAccount({ pi, connect, agentDir }, a);
+  let pendingSync: Promise<string[]> | undefined;
+  async function sync(a: LoggedIn) {
+    // A login must not be overwritten by a still-running refresh of the previous account.
+    const current = (pendingSync ?? Promise.resolve()).catch(() => {}).then(() => syncAccount({ pi, connect, agentDir }, a));
+    pendingSync = current;
+    try { return await current; }
+    finally { if (pendingSync === current) pendingSync = undefined; }
+  }
+  function refresh(account: LoggedIn | null) {
+    if (account && !pendingSync) {
+      void sync(account).catch((e) => process.stderr.write(`cgs: ${e instanceof Error ? e.message : e}\n`));
+    }
+  }
   // One /usage card for the account (its balance and subscriptions are not per channel), on the login provider; read at call time.
   const usage = createUsageProvider("cgs", (r) => connect.router.fetch(r), () => readAccount(agentDir));
   pi.registerProvider("cgs", { oauth: cgsLoginProvider(connect.router, process.env, sync), usage });
   registerRemoteCommands(pi);
   registerAgentCommand(pi, { agentDir, fetch: (r) => connect.router.fetch(r) });
   divert((i, init) => connect.fetch(new Request(i, init)));
-  // A stored account: the channels exist from the last known list at once, then the list and prices are refreshed in the background.
+  // Register cached models and metadata immediately, then refresh them in the background.
   const account = readAccount(agentDir);
   if (account) {
     applyCredentialEnv(account.clientSecret);
     applyCurrencyEnv(account.currency);
-    connect.hub.setModels(account.models, account.pricing);
+    connect.hub.setModels(account.models, account.pricing, account.capabilities);
     await registerChannels(pi, (i, init) => connect.fetch(new Request(i, init)));
-    void sync(account).catch((e) => process.stderr.write(`cgs: ${e instanceof Error ? e.message : e}\n`));
+    refresh(account);
   }
+  const timer = setInterval(() => refresh(readAccount(agentDir)), ACCOUNT_SYNC_INTERVAL_MS);
+  timer.unref();
+  process.once("exit", () => { clearInterval(timer); connect.stop(); });
 }

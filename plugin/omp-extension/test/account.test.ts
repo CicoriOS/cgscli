@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
 import { createConnect, applyDefaultLayout, normalizeLayout, seedDistributionDefaults, DISABLED_PROVIDERS, resolveAgentDir } from "@cgscli/connect";
-import { readAccount } from "../account.ts";
+import { credentialsPath, fetchModelCapabilities, readAccount } from "../account.ts";
 import { registerAgentCommand, syncAccount } from "../index.ts";
 
 const dirs: string[] = [];
@@ -14,14 +14,15 @@ afterEach(() => { for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true
 const LAYOUT = { orchestrator: { model: "cgs-claude/claude-a", thinking: "off" }, agents: [{ name: "task", model: "cgs-openai/deepseek-x", thinking: "max" }], web_model: "cgs-antigravity/gemini-w" };
 const ok = (data: unknown) => Response.json({ success: true, data });
 
-/** A fake server behind the router: /v1/models, /api/device/pricing, /api/device/layout. */
-function server(o: { models?: string[] | Response; pricing?: Response; layout?: Response } = {}) {
+/** A fake server behind the router. */
+function server(o: { models?: string[] | Response; pricing?: Response; capabilities?: Response; layout?: Response } = {}) {
   const seen: string[] = [];
   const handler = async (r: Request) => {
     const p = new URL(r.url).pathname;
     seen.push(`${p} ${r.headers.get("authorization")}`);
     if (p === "/v1/models") return o.models instanceof Response ? o.models : Response.json({ data: (o.models ?? ["claude-a", "gemini-w", "gpt-5", "deepseek-x"]).map((id) => ({ id })) });
     if (p === "/api/device/pricing") return o.pricing ?? ok({ currency: "CNY", unit: "per_million_tokens", models: { "claude-a": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 } } });
+    if (p === "/api/device/models") return o.capabilities ?? ok({ models: { "claude-a": { input: ["text", "image"], thinking_levels: ["low", "high"], source: "admin" } } });
     if (p === "/api/device/layout") return o.layout ?? ok(LAYOUT);
     return new Response("nope", { status: 404 });
   };
@@ -36,7 +37,7 @@ function pi() {
 
 const login = { baseUrl: "https://cgs.example", clientSecret: "sk-client", username: "u", tier: "lite" };
 
-test("login: models land on the right channels with prices, the account is stored, the layout applied", async () => {
+test("login: models land on the right channels with prices and inputs, the account is stored, the layout applied", async () => {
   const agentDir = tmp(), s = server(), p = pi();
   const ids = await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
   s.connect.stop();
@@ -44,14 +45,64 @@ test("login: models land on the right channels with prices, the account is store
   expect(Object.keys(p.reg).sort()).toEqual(["cgs-antigravity", "cgs-claude", "cgs-codex", "cgs-openai"]);
   expect(p.reg["cgs-claude"].models.map((m: any) => m.id)).toEqual(["claude-a"]);
   expect(p.reg["cgs-claude"].models[0].cost).toEqual({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 });
+  expect(p.reg["cgs-claude"].models[0].input).toEqual(["text", "image"]);
+  expect(p.reg["cgs-codex"].models[0].input).toEqual(["text"]);
   expect(p.reg["cgs-codex"].models[0].cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   expect(p.reg["cgs-claude"].apiKey).toBe("CGS_CLIENT_SECRET");
   expect(process.env.CGS_CLIENT_SECRET).toBe("sk-client");
   expect(JSON.parse(process.env.CGS_ANTIGRAVITY_KEY!).token).toBe("sk-client");
   expect(s.seen).toContain("/v1/models Bearer sk-client");
+  expect(s.seen).toContain("/api/device/models Bearer sk-client");
   expect(readAccount(agentDir)?.models).toEqual(ids);
+  const capabilities = { "claude-a": { input: ["text", "image"], thinking_levels: ["low", "high"], source: "admin" } };
+  expect(JSON.parse(fs.readFileSync(credentialsPath(agentDir), "utf8")).capabilities).toEqual(capabilities);
+  expect(readAccount(agentDir)?.capabilities).toEqual(capabilities);
   const cfg = YAML.parse(fs.readFileSync(path.join(agentDir, "config.yml"), "utf8"));
   expect(cfg.modelRoles.default).toBe("cgs-claude/claude-a:off");
+});
+
+test("legacy credentials without capabilities still load", () => {
+  const agentDir = tmp(), file = credentialsPath(agentDir);
+  fs.mkdirSync(path.dirname(file));
+  fs.writeFileSync(file, JSON.stringify({ ...login, models: ["claude-a"], pricing: {} }));
+  expect(readAccount(agentDir)).toMatchObject({ ...login, models: ["claude-a"], capabilities: {} });
+});
+
+test("capability fetch sanitizes inputs and optional metadata and drops malformed model entries", async () => {
+  const result = await fetchModelCapabilities(async (r) => {
+    expect(r.method).toBe("GET");
+    expect(r.url).toBe("https://cgs.example/api/device/models");
+    expect(r.headers.get("authorization")).toBe("Bearer sk-client");
+    return ok({ models: {
+      "claude-a": { input: ["image", "image", "unknown", "constructor", null, 42, { type: "audio" }], thinking_levels: [false, "low"], source: "admin" },
+      "gpt-5": { input: ["bogus"], thinking_levels: "high", source: true },
+      empty: null, wrong: { input: "image" }, missing: { source: "admin" }, array: ["image"],
+    } });
+  }, `${login.baseUrl}/`, login.clientSecret);
+  expect(result).toEqual({
+    "claude-a": { input: ["text", "image"], thinking_levels: ["low"], source: "admin" },
+    "gpt-5": { input: ["text"] },
+  });
+});
+
+test("capability fetch returns null for missing, failed or malformed responses", async () => {
+  expect(await fetchModelCapabilities(async () => { throw new Error("offline"); }, login.baseUrl, login.clientSecret)).toBeNull();
+  for (const response of [new Response(null, { status: 404 }), new Response("not JSON"), ok({ models: [] })]) {
+    expect(await fetchModelCapabilities(async () => response, login.baseUrl, login.clientSecret)).toBeNull();
+  }
+});
+
+test("a refresh against an older server drops cached modalities and registers text-only models", async () => {
+  const agentDir = tmp(), p = pi(), oldServer = new Response(null, { status: 404 });
+  let s = server();
+  await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
+  s.connect.stop();
+  expect(p.reg["cgs-claude"].models[0].input).toEqual(["text", "image"]);
+  s = server({ capabilities: oldServer });
+  await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
+  s.connect.stop();
+  expect(p.reg["cgs-claude"].models[0].input).toEqual(["text"]);
+  expect(readAccount(agentDir)?.capabilities).toEqual({});
 });
 
 test("an empty model list or a server error fails the login with a readable message and registers nothing", async () => {

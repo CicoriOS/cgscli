@@ -3,7 +3,7 @@
 // says it moved on (`refresh`, `switched`, `rotate`), the client answers by looking like a new conversation: the next
 // requests of that channel carry a new wire session id (omp patch P9 asks `sessionIdentity` for it).
 import { createHash, randomBytes } from "node:crypto";
-import { CGSCONNECT_ORIGIN, type ChannelEvent, type IdentityEvent, type ModelManifest, type ProviderHub, type Router } from "../contracts.ts";
+import { CGSCONNECT_ORIGIN, type ChannelEvent, type IdentityEvent, type ModelCapabilities, type ProviderHub, type Router } from "../contracts.ts";
 import { buildManifest, CHANNEL_API, channelOfPath, type Channel, type SitePrice } from "./channels.ts";
 import { ChannelTracker, parseUpstream, transientFailure, UPSTREAM_HEADER, type Upstream } from "./upstream.ts";
 
@@ -11,12 +11,13 @@ export interface ProviderHubOptions {
   router: Router;
   models?: string[];
   pricing?: Record<string, SitePrice>;
+  capabilities?: ModelCapabilities;
   /** Secret of this machine; `device_id` is derived from it. Random per process when omitted. */
   deviceSeed?: string;
 }
 
 export interface ProviderHubImpl extends ProviderHub {
-  setModels(ids: string[], pricing?: Record<string, SitePrice>): void;
+  setModels(ids: string[], pricing?: Record<string, SitePrice>, capabilities?: ModelCapabilities): void;
   /** Serves requests addressed to CGSCONNECT_ORIGIN (manifest, provider traffic); reached by direct call, never a socket. */
   fetch(req: Request): Promise<Response>;
 }
@@ -59,9 +60,11 @@ export function createProviderHub(o: ProviderHubOptions): ProviderHubImpl {
   const tracker = new ChannelTracker();
   let models = o.models ?? [];
   let pricing = o.pricing ?? {};
+  let capabilities = o.capabilities ?? {};
 
   const base = CGSCONNECT_ORIGIN;
   const epochOf = (provider: string) => epochs.get(provider) ?? 0;
+  const manifest = () => buildManifest(base, models, pricing, capabilities);
 
   /**
    * A new identity for `provider`. `startEpoch` is the epoch the signalling request was sent under: a signal from a
@@ -87,7 +90,7 @@ export function createProviderHub(o: ProviderHubOptions): ProviderHubImpl {
   async function handle(req: Request): Promise<Response> {
     const u = new URL(req.url);
     if (u.origin !== CGSCONNECT_ORIGIN) return new Response("forbidden", { status: 403 });
-    if (u.pathname === "/_cgsconnect/manifest") return Response.json(buildManifest(base, models, pricing));
+    if (u.pathname === "/_cgsconnect/manifest") return Response.json(manifest());
     const target = channelOfPath(u.pathname);
     if (!target) return new Response("not found", { status: 404 });
     const { channel, rest } = target;
@@ -120,8 +123,8 @@ export function createProviderHub(o: ProviderHubOptions): ProviderHubImpl {
     onIdentity: (cb) => void identityListeners.push(cb),
     onChannel: (cb) => void channelListeners.push(cb),
     lastChannel: (p) => tracker.lastChannel(p as Channel),
-    manifest: (): ModelManifest => buildManifest(base, models, pricing),
-    setModels(ids, p) { models = ids; if (p) pricing = p; },
+    manifest,
+    setModels(ids, p, c = {}) { models = ids; if (p) pricing = p; capabilities = c; },
     fetch: handle,
   };
 }
