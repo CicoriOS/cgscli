@@ -1,7 +1,8 @@
 // Everything cgs writes into omp's config.yml: the distribution defaults (seeded once, only where a key is absent) and the
-// server default layout (applied once after the first login). Both are DEFAULTS, not locks: omp's own settings UI
-// (/settings, /agents, /model) edits the same file and later launches/logins never overwrite those edits.
+// server default layout (followed until the user edits a layout-managed role, ADR 0028). Neither overrides a user's own
+// edits made through omp's settings UI (/settings, /agents, /model), which write the same file.
 // Ported from the legacy src/cgs/config-writer.js (ompweb-desktop); YAML comments and unrelated keys are preserved.
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -122,18 +123,58 @@ export function normalizeLayout(data: unknown): Layout | null {
  * Pure: write a layout into `doc`. The orchestrator becomes `modelRoles.default`, each agent
  * `task.agentModelOverrides.<name>` (the keys omp's task tool reads, the same ones /agents edits), and the web model
  * `modelRoles.web` plus a one-entry `retry.fallbackChains.web` so a search failure surfaces instead of switching provider.
+ * With `previous` (the layout this client wrote last), what the cloud has since dropped is removed again.
  */
-export function applyLayoutToDocument(doc: YAML.Document, l: Layout): void {
+export function applyLayoutToDocument(doc: YAML.Document, l: Layout, previous?: Layout): void {
   doc.setIn(["modelRoles", "default"], l.orchestrator);
   for (const a of l.agents) doc.setIn(["task", "agentModelOverrides", a.name], a.selector);
+  for (const a of previous?.agents ?? []) if (!l.agents.some((n) => n.name === a.name)) doc.deleteIn(["task", "agentModelOverrides", a.name]);
   if (l.webModel) {
     doc.setIn(["modelRoles", "web"], l.webModel);
     doc.setIn(["retry", "fallbackChains", "web"], [l.webModel]);
+  } else if (previous?.webModel) {
+    doc.deleteIn(["modelRoles", "web"]);
+    doc.deleteIn(["retry", "fallbackChains", "web"]);
   }
+}
+
+/** What the layout manages in config.yml: every model role, every agent override and the web fallback chain. */
+export interface Managed { roles: Record<string, unknown>; agents: Record<string, unknown>; webFallback: unknown }
+
+function managedOf(doc: YAML.Document): Managed {
+  const js = (doc.toJS() ?? {}) as Record<string, any>;
+  const map = (v: unknown): Record<string, unknown> => (v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {});
+  return { roles: map(js.modelRoles), agents: map(js.task?.agentModelOverrides), webFallback: js.retry?.fallbackChains?.web ?? null };
+}
+
+/** JSON with sorted keys, so two values compare equal whatever order their keys were written in. */
+function stable(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stable).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${stable((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v) ?? "null";
 }
 
 function readState(agentDir: string): Record<string, unknown> {
   try { const v: unknown = JSON.parse(fs.readFileSync(stateFile(agentDir), "utf8")); return v && typeof v === "object" ? (v as Record<string, unknown>) : {}; } catch { return {}; }
+}
+
+function writeState(agentDir: string, patch: Record<string, unknown>): void {
+  const next = { ...readState(agentDir), ...patch };
+  for (const k of Object.keys(next)) if (next[k] === undefined) delete next[k];
+  writeAtomic(stateFile(agentDir), `${JSON.stringify(next, null, 2)}\n`);
+}
+
+interface LayoutState { hash: string; applied: Layout; snapshot: Managed }
+
+async function fetchLayout(o: ApplyLayoutOptions): Promise<Layout | null> {
+  try {
+    const r = await o.fetch(new Request(`${o.baseUrl.replace(/\/+$/, "")}/api/device/layout`, {
+      headers: { Authorization: `Bearer ${o.clientSecret}`, Accept: "application/json" },
+      signal: o.signal ?? AbortSignal.timeout(15_000),
+    }));
+    const body = r.status === 200 ? ((await r.json().catch(() => null)) as { success?: unknown; data?: unknown } | null) : null;
+    return body?.success === true ? normalizeLayout(body.data) : null;
+  } catch { return null; }
 }
 
 export interface ApplyLayoutOptions {
@@ -144,27 +185,43 @@ export interface ApplyLayoutOptions {
   signal?: AbortSignal;
 }
 
+export type LayoutResult = "applied" | "updated" | "up-to-date" | "user-managed" | "unavailable";
+
 /**
- * Apply the server's default layout once per agent dir. A failed fetch or an unusable layout leaves the marker unset, so
- * the next login or startup tries again; once applied (`defaultsApplied`) nothing is ever rewritten, so manual edits in
- * /agents survive.
+ * Keep the config's model layout in step with the server's (ADR 0028). Until the user changes any layout-managed role in
+ * config.yml (a model role, an agent override, the web fallback chain) every login or start applies what the cloud now
+ * says. The first difference from what this client last wrote marks the agent dir `layoutTakeover` in state.json, for good:
+ * from then on nothing is fetched and nothing is rewritten. The check reads only local files, so it works offline.
+ * A failed fetch or an unusable layout changes nothing; the next login or start tries again.
  */
-export async function applyDefaultLayout(o: ApplyLayoutOptions): Promise<"applied" | "already-applied" | "unavailable"> {
-  if (readState(o.agentDir).defaultsApplied === true) return "already-applied";
-  let layout: Layout | null = null;
-  try {
-    const r = await o.fetch(new Request(`${o.baseUrl.replace(/\/+$/, "")}/api/device/layout`, {
-      headers: { Authorization: `Bearer ${o.clientSecret}`, Accept: "application/json" },
-      signal: o.signal ?? AbortSignal.timeout(15_000),
-    }));
-    const body = r.status === 200 ? ((await r.json().catch(() => null)) as { success?: unknown; data?: unknown } | null) : null;
-    if (body?.success === true) layout = normalizeLayout(body.data);
-  } catch { return "unavailable"; }
-  if (!layout) return "unavailable";
+export async function applyDefaultLayout(o: ApplyLayoutOptions): Promise<LayoutResult> {
+  const state = readState(o.agentDir);
+  if (state.layoutTakeover) return "user-managed";
   const file = configFile(o.agentDir);
+  const prior = state.layout as LayoutState | undefined;
+  const takeOver = (reason: string): LayoutResult => {
+    writeState(o.agentDir, { layoutTakeover: { at: new Date().toISOString(), reason } });
+    return "user-managed";
+  };
+
+  if (prior && stable(managedOf(loadDoc(file).doc)) !== stable(prior.snapshot)) return takeOver("a layout-managed role was changed in config.yml");
+  const layout = await fetchLayout(o);
+  if (!layout) return "unavailable";
+  const hash = createHash("sha256").update(stable(layout)).digest("hex");
   const { doc, text } = loadDoc(file);
-  applyLayoutToDocument(doc, layout);
+
+  if (!prior && state.defaultsApplied === true) {
+    // Installed before ADR 0028: follow only when the config is exactly what this layout writes.
+    const probe = YAML.parseDocument(text);
+    applyLayoutToDocument(probe, layout);
+    if (stable(managedOf(probe)) !== stable(managedOf(doc))) return takeOver("config.yml differs from the layout of a client that predates takeover tracking");
+    writeState(o.agentDir, { defaultsApplied: undefined, layout: { hash, applied: layout, snapshot: managedOf(doc) } satisfies LayoutState });
+    return "up-to-date";
+  }
+  if (prior?.hash === hash) return "up-to-date";
+
+  applyLayoutToDocument(doc, layout, prior?.applied);
   saveDoc(file, doc, text);
-  writeAtomic(stateFile(o.agentDir), `${JSON.stringify({ ...readState(o.agentDir), defaultsApplied: true }, null, 2)}\n`);
-  return "applied";
+  writeState(o.agentDir, { defaultsApplied: undefined, layout: { hash, applied: layout, snapshot: managedOf(doc) } satisfies LayoutState });
+  return prior ? "updated" : "applied";
 }

@@ -4,9 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Router, RouterStatus } from "../contracts.ts";
 import { PRODUCTION_ROOT_KEYS, rootsFromHex, verifyBundle, type Roots, type TunnelConfig } from "./bundle.ts";
-import { dialTunnel, HEALTH_PATH, ORIGIN_HEADER, targetKey, wsCarrier, type Carrier, type Target } from "./tunnel.ts";
+import { defaultCarrierUrl, dialTunnel, HEALTH_PATH, makeWsCarrier, ORIGIN_HEADER, targetKey, type Carrier, type Target } from "./tunnel.ts";
 import { bootstrap } from "./bootstrap.ts";
 import { loadRanges, pinnedFetch, preferIps, probeIp, type CloudflarePreset } from "./cloudflare.ts";
+import { proxyFor } from "./proxy.ts";
 
 export const CONTROL_PREFIX = "/_cgs-agent/";
 const MAX_REQUEST_BODY = 64 << 20;
@@ -34,6 +35,10 @@ export interface RouterOptions {
   cloudflare?: CloudflarePreset;
   /** Test seams for the Cloudflare selection. */
   cloudflareHooks?: { probe?: typeof probeIp; pinned?: typeof pinnedFetch };
+  /** Environment the proxy variables are read from (default `process.env`); see ADR 0029. */
+  env?: NodeJS.ProcessEnv;
+  /** How long a better-ranked candidate may still answer once a lower-ranked one has passed Bootstrap (default 3000 ms). */
+  patienceMs?: number;
 }
 
 export interface ControlStatus extends RouterStatus { tunnel_configured: boolean; config_version?: number }
@@ -66,8 +71,13 @@ export function createRouter(o: RouterOptions): RouterImpl {
   for (const c of candidates) if ((c.protocol !== "https:" && c.protocol !== "http:") || !c.host) throw new Error("upstream must be an http(s) URL with a host");
   let up = candidates[0]!;
   const roots = o.roots ?? rootsFromHex(PRODUCTION_ROOT_KEYS);
-  const carrier = o.carrier ?? wsCarrier;
-  const plainDirect = o.directFetch ?? ((r: Request) => fetch(r));
+  const env = o.env ?? process.env;
+  const carrier = o.carrier ?? makeWsCarrier(defaultCarrierUrl, env);
+  // Bun's fetch would read the proxy variables itself, but the other transports do not: every path asks proxyFor and says so.
+  const plainDirect = o.directFetch ?? ((r: Request) => {
+    const proxy = proxyFor(new URL(r.url), env);
+    return proxy ? fetch(r, { proxy } as RequestInit) : fetch(r);
+  });
   let pin: { host: string; fetch: (r: Request) => Promise<Response> } | null = null;
   const direct = (r: Request) => (pin && new URL(r.url).host === pin.host ? pin.fetch(r) : plainDirect(r));
   const sticky = o.stickyMs ?? 10 * 60_000;
@@ -320,7 +330,9 @@ export function createRouter(o: RouterOptions): RouterImpl {
   }
 
   let booting: Promise<void> | null = null;
-  const cf = o.cloudflare?.enabled ? o.cloudflare : null;
+  const proxied = candidates.some((c) => proxyFor(c, env) !== undefined);
+  if (proxied && o.cloudflare?.enabled) log("outbound proxy set: Cloudflare edge selection is off, the proxy chooses the path");
+  const cf = o.cloudflare?.enabled && !proxied ? o.cloudflare : null;
 
   /** No candidate answers on the plain route: pin the fastest Cloudflare IP across the https candidates. */
   async function cloudflareSelect(): Promise<URL | null> {
@@ -338,7 +350,7 @@ export function createRouter(o: RouterOptions): RouterImpl {
   function rebootstrap(): Promise<void> {
     if (candidates.length < 2 && !cf) return Promise.resolve();
     booting ??= (async () => {
-      let won = await bootstrap(candidates, { direct, log });
+      let won = await bootstrap(candidates, { direct, log, patienceMs: o.patienceMs });
       if (!won && cf) won = await cloudflareSelect();
       else if (won && pin && won.host !== pin.host) pin = null;
       if (won && won.origin !== up.origin) { log(`API origin selected: ${won.host}`); up = won; closeSession(); bump(); }

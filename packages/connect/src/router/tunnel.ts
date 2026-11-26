@@ -3,6 +3,7 @@
 import { Duplex } from "node:stream";
 import type { Endpoint } from "./bundle.ts";
 import { MAX_MESSAGE, MAX_PLAINTEXT, noiseInitiator, type Transport } from "./noise.ts";
+import { proxyFor } from "./proxy.ts";
 
 export const GATEWAY_PATH = "/api/tunnel/v1";
 export const HEALTH_PATH = "/api/tunnel/health";
@@ -30,11 +31,15 @@ export function defaultCarrierUrl(target: Target): string {
   return `${ep.tls ? "wss" : "ws"}://${addr}:${ep.port}${GATEWAY_PATH}`;
 }
 
-/** WebSocket carrier; `urlOf` lets tests point targets at a local gateway. */
-export const makeWsCarrier = (urlOf: (t: Target) => string): Carrier => async (target, signal) => {
+/**
+ * WebSocket carrier; `urlOf` lets tests point targets at a local gateway. Bun's WebSocket ignores the proxy variables, so the
+ * proxy (ADR 0029) is passed explicitly.
+ */
+export const makeWsCarrier = (urlOf: (t: Target) => string, env: NodeJS.ProcessEnv = process.env): Carrier => async (target, signal) => {
   const ep = target.endpoint;
   const url = urlOf(target);
-  const ws = new WebSocket(url, { headers: { Host: `${ep.host}:${ep.port}` }, tls: { rejectUnauthorized: false, serverName: ep.host } } as unknown as string[]);
+  const proxy = proxyFor(new URL(url), env);
+  const ws = new WebSocket(url, { headers: { Host: `${ep.host}:${ep.port}` }, tls: { rejectUnauthorized: false, serverName: ep.host }, ...(proxy ? { proxy } : {}) } as unknown as string[]);
   ws.binaryType = "arraybuffer";
   const queue: Uint8Array[] = [];
   let pending: PromiseWithResolvers<Uint8Array> | null = null;

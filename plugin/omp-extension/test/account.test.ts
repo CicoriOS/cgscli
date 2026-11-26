@@ -92,20 +92,72 @@ test("re-login replaces the list: channels without models are unregistered", asy
   expect(p.reg["cgs-claude"].models.map((m: any) => m.id)).toEqual(["claude-b"]);
 });
 
-test("layout: applied once; a manual edit afterwards is never overwritten; comments and unrelated keys survive", async () => {
-  const agentDir = tmp();
-  fs.writeFileSync(path.join(agentDir, "config.yml"), "# mine\ntheme: dark\n");
-  const via = async () => ok(LAYOUT);
-  const o = { agentDir, baseUrl: "https://x", clientSecret: "k", fetch: via };
-  expect(await applyDefaultLayout(o)).toBe("applied");
-  const file = path.join(agentDir, "config.yml");
+const NEXT = { orchestrator: { model: "cgs-claude/claude-b", thinking: "high" }, agents: [{ name: "explore", model: "cgs-openai/deepseek-y" }], web_model: "" };
+const layoutOf = (agentDir: string) => ({ file: path.join(agentDir, "config.yml"), state: path.join(agentDir, "cgs", "state.json") });
+
+test("layout: follows the cloud while the user changes nothing; comments and unrelated keys survive; dropped roles go", async () => {
+  const agentDir = tmp(), { file } = layoutOf(agentDir);
+  fs.writeFileSync(file, "# mine\ntheme: dark\n");
+  const at = (data: unknown) => ({ agentDir, baseUrl: "https://x", clientSecret: "k", fetch: async () => ok(data) });
+  expect(await applyDefaultLayout(at(LAYOUT))).toBe("applied");
   let cfg = YAML.parse(fs.readFileSync(file, "utf8"));
   expect(cfg).toMatchObject({ theme: "dark", modelRoles: { default: "cgs-claude/claude-a:off", web: "cgs-antigravity/gemini-w" }, task: { agentModelOverrides: { task: "cgs-openai/deepseek-x:max" } }, retry: { fallbackChains: { web: ["cgs-antigravity/gemini-w"] } } });
-  expect(fs.readFileSync(file, "utf8")).toContain("# mine");
-  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("cgs-claude/claude-a:off", "cgs-claude/other"));
-  expect(await applyDefaultLayout(o)).toBe("already-applied");
+  expect(await applyDefaultLayout(at(LAYOUT))).toBe("up-to-date");
+  expect(await applyDefaultLayout(at(NEXT))).toBe("updated");
   cfg = YAML.parse(fs.readFileSync(file, "utf8"));
-  expect(cfg.modelRoles.default).toBe("cgs-claude/other");
+  expect(cfg.modelRoles).toEqual({ default: "cgs-claude/claude-b:high" });
+  expect(cfg.task.agentModelOverrides).toEqual({ explore: "cgs-openai/deepseek-y" });
+  expect(cfg.retry?.fallbackChains?.web).toBeUndefined();
+  expect(cfg.theme).toBe("dark");
+  expect(fs.readFileSync(file, "utf8")).toContain("# mine");
+});
+
+test("layout: changing even one role locks it for good, with no further fetch, even offline", async () => {
+  const agentDir = tmp(), { file, state } = layoutOf(agentDir);
+  let calls = 0;
+  const at = (data: unknown) => ({ agentDir, baseUrl: "https://x", clientSecret: "k", fetch: async () => { calls++; return ok(data); } });
+  expect(await applyDefaultLayout(at(LAYOUT))).toBe("applied");
+  fs.writeFileSync(file, fs.readFileSync(file, "utf8").replace("cgs-openai/deepseek-x:max", "cgs-openai/mine"));
+  calls = 0;
+  expect(await applyDefaultLayout(at(NEXT))).toBe("user-managed");
+  expect(calls).toBe(0);
+  expect(JSON.parse(fs.readFileSync(state, "utf8")).layoutTakeover.at).toBeString();
+  expect(await applyDefaultLayout(at(NEXT))).toBe("user-managed");
+  expect(await applyDefaultLayout({ agentDir, baseUrl: "https://x", clientSecret: "k", fetch: async () => { throw new Error("offline"); } })).toBe("user-managed");
+  expect(YAML.parse(fs.readFileSync(file, "utf8")).task.agentModelOverrides.task).toBe("cgs-openai/mine");
+  expect(calls).toBe(0);
+});
+
+test("layout: any added, removed or edited role counts as taking over", async () => {
+  for (const edit of [
+    (t: string) => t.replace("agentModelOverrides:\n    task:", "agentModelOverrides:\n    mine: a/b\n    task:"),
+    (t: string) => t.replace(/\n {4}task: .*/, ""),
+    (t: string) => t.replace("default: cgs-claude/claude-a:off", "default: other/model"),
+    (t: string) => t.replace("web: cgs-antigravity/gemini-w", "web: other/web"),
+  ]) {
+    const agentDir = tmp(), { file } = layoutOf(agentDir);
+    const at = { agentDir, baseUrl: "https://x", clientSecret: "k", fetch: async () => ok(LAYOUT) };
+    await applyDefaultLayout(at);
+    const before = fs.readFileSync(file, "utf8");
+    fs.writeFileSync(file, edit(before));
+    expect(fs.readFileSync(file, "utf8")).not.toBe(before);
+    expect(await applyDefaultLayout({ ...at, fetch: async () => ok(NEXT) })).toBe("user-managed");
+  }
+});
+
+test("layout: a config written by a client that predates takeover tracking is followed only if it matches the layout", async () => {
+  const at = (agentDir: string, data: unknown) => ({ agentDir, baseUrl: "https://x", clientSecret: "k", fetch: async () => ok(data) });
+  const same = tmp(), { file: f1, state: s1 } = layoutOf(same);
+  await applyDefaultLayout(at(same, LAYOUT));
+  fs.writeFileSync(s1, JSON.stringify({ defaultsApplied: true }));
+  expect(await applyDefaultLayout(at(same, LAYOUT))).toBe("up-to-date");
+  expect(await applyDefaultLayout(at(same, NEXT))).toBe("updated");
+  expect(YAML.parse(fs.readFileSync(f1, "utf8")).modelRoles.default).toBe("cgs-claude/claude-b:high");
+  const edited = tmp(), { file: f2, state: s2 } = layoutOf(edited);
+  await applyDefaultLayout(at(edited, LAYOUT));
+  fs.writeFileSync(f2, fs.readFileSync(f2, "utf8").replace("claude-a:off", "mine"));
+  fs.writeFileSync(s2, JSON.stringify({ defaultsApplied: true }));
+  expect(await applyDefaultLayout(at(edited, NEXT))).toBe("user-managed");
 });
 
 test("layout: a failed or unusable response leaves the marker unset so the next login retries", async () => {

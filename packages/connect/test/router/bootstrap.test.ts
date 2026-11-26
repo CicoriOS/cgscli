@@ -19,10 +19,41 @@ function api(o: { delayMs?: number; marker?: boolean; status?: number } = {}) {
 const dead = () => { const s = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("") }); const u = `http://127.0.0.1:${s.port}`; s.stop(true); return u; };
 const direct = (r: Request) => fetch(r);
 
-test("bootstrap takes the fastest healthy candidate, not the first in the list", async () => {
-  const slow = api({ delayMs: 250 }), fast = api({ delayMs: 0 });
-  const won = await bootstrap([new URL(slow), new URL(fast)], { direct });
-  expect(won?.origin).toBe(new URL(fast).origin);
+test("bootstrap takes the first healthy candidate in list order, not the fastest", async () => {
+  const preferred = api({ delayMs: 250 }), fast = api({ delayMs: 0 });
+  expect((await bootstrap([new URL(preferred), new URL(fast)], { direct }))?.origin).toBe(new URL(preferred).origin);
+  expect((await bootstrap([new URL(fast), new URL(preferred)], { direct }))?.origin).toBe(new URL(fast).origin);
+});
+
+test("a preferred candidate that is too slow is passed over once the patience runs out, and a failed one at once", async () => {
+  const preferred = api({ delayMs: 700 }), fast = api({ delayMs: 0 });
+  const t0 = Date.now();
+  expect((await bootstrap([new URL(preferred), new URL(fast)], { direct, patienceMs: 150 }))?.origin).toBe(new URL(fast).origin);
+  expect(Date.now() - t0).toBeLessThan(600);
+  expect((await bootstrap([new URL(preferred), new URL(fast)], { direct, patienceMs: 3000 }))?.origin).toBe(new URL(preferred).origin);
+  expect((await bootstrap([new URL(dead()), new URL(fast)], { direct, patienceMs: 3000 }))?.origin).toBe(new URL(fast).origin);
+});
+
+test("Bootstrap probes and requests leave through the proxy named by HTTP_PROXY, not PI_PROXY; loopback and NO_PROXY hosts go direct", async () => {
+  const seen: string[] = [];
+  const proxy = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch(req) { seen.push(req.url); return new Response("ok", { headers: { "x-cgs-origin": "1" } }); } });
+  servers.push(proxy);
+  const env = { HTTP_PROXY: `http://127.0.0.1:${proxy.port}`, PI_PROXY: "http://127.0.0.1:1", NO_PROXY: "skip.invalid" };
+  const r = createRouter({ upstream: ["http://a.invalid", "http://b.invalid"], env, cloudflare: { enabled: true } });
+  await r.ready();
+  expect(r.upstream()).toBe("http://a.invalid");
+  const res = await r.fetch(new Request("http://x.invalid/api/status"));
+  expect(res.status).toBe(200);
+  expect(seen).toContain("http://a.invalid/api/tunnel/health");
+  expect(seen).toContain("http://b.invalid/api/tunnel/health");
+  expect(seen.some((u) => u.startsWith("http://a.invalid/api/status"))).toBe(true);
+  r.stop();
+  const local = api();
+  const direct2 = createRouter({ upstream: [local, api({ delayMs: 50 })], env });
+  await direct2.ready();
+  expect(direct2.upstream()).toBe(new URL(local).origin);
+  expect(seen.some((u) => u.includes("127.0.0.1"))).toBe(false);
+  direct2.stop();
 });
 
 test("an answer without the origin marker or with an error status is not healthy (a CDN made it up)", async () => {

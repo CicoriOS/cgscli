@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { DEFAULT_CANDIDATES, candidatesFrom, logicalOrigin } from "../defaults.ts";
 
-test("default candidates fall back ai.cicori.com -> apia.bmpss.top -> ai.cnklp.cn; ai.tmp.cnklp.cn is retired", () => {
-  expect(candidatesFrom({})).toEqual(["https://ai.cicori.com", "https://apia.bmpss.top", "https://ai.cnklp.cn"]);
+test("default candidates are prioritised apia.bmpss.top (Cloudflare) -> ai.cicori.com -> ai.cnklp.cn; ai.tmp.cnklp.cn is retired", () => {
+  expect(candidatesFrom({})).toEqual(["https://apia.bmpss.top", "https://ai.cicori.com", "https://ai.cnklp.cn"]);
   expect(DEFAULT_CANDIDATES.some((c) => c.includes("tmp.cnklp"))).toBe(false);
 });
 
