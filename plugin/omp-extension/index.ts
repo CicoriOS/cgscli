@@ -169,14 +169,14 @@ const LAYOUT_SYNC_REPORT: Record<LayoutResult, [string, "info" | "warning" | "er
 };
 
 /**
- * `/agent layout sync`: apply the cloud layout over the user's own edits and follow the cloud again (ADR 0028). Roles the
+ * `/agents layout sync (bare /agents stays omp's hub: the builtin takes no arguments, so only the argument form reaches us)`: apply the cloud layout over the user's own edits and follow the cloud again (ADR 0028). Roles the
  * user added that the cloud does not know are left alone.
  */
 export function registerAgentCommand(pi: ExtensionApi, o: { agentDir: string; fetch: (req: Request) => Promise<Response>; applyLayout?: typeof applyDefaultLayout }): void {
-  pi.registerCommand("agent", {
+  pi.registerCommand("agents", {
     description: "layout sync: force the cloud's default model layout onto this machine",
     handler: async (args, ctx) => {
-      if (args.trim().replace(/\s+/g, " ") !== "layout sync") return ctx.ui.notify("usage: /agent layout sync", "warning");
+      if (args.trim().replace(/\s+/g, " ") !== "layout sync") return ctx.ui.notify("usage: /agents layout sync", "warning");
       const account = readAccount(o.agentDir);
       if (!account) return ctx.ui.notify("Not logged in to CGS: use /login first.", "error");
       const result = await (o.applyLayout ?? applyDefaultLayout)({ agentDir: o.agentDir, baseUrl: account.baseUrl, clientSecret: account.clientSecret, fetch: o.fetch, force: true });

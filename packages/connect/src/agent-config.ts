@@ -183,7 +183,7 @@ export interface ApplyLayoutOptions {
   clientSecret: string;
   fetch: (req: Request) => Promise<Response>;
   signal?: AbortSignal;
-  /** `/agent layout sync`: apply the cloud layout over whatever config.yml says and clear any takeover, then follow again. */
+  /** `/agents layout sync`: apply the cloud layout over whatever config.yml says and clear any takeover, then follow again. */
   force?: boolean;
 }
 

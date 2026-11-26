@@ -160,7 +160,7 @@ test("layout: a config written by a client that predates takeover tracking is fo
   expect(await applyDefaultLayout(at(edited, NEXT))).toBe("user-managed");
 });
 
-test("/agent layout sync overwrites the user's edits, clears the takeover and follows the cloud again", async () => {
+test("/agents layout sync overwrites the user's edits, clears the takeover and follows the cloud again", async () => {
   const agentDir = tmp(), p = pi(), s = server();
   const file = path.join(agentDir, "config.yml"), state = path.join(agentDir, "cgs", "state.json");
   await syncAccount({ pi: p.api, connect: s.connect, agentDir }, login);
@@ -170,12 +170,12 @@ test("/agent layout sync overwrites the user's edits, clears the takeover and fo
   const notes: string[] = [], cmds: Record<string, { handler(args: string, ctx: unknown): Promise<void> }> = {};
   registerAgentCommand({ ...p.api, registerCommand: (n: string, o: never) => { cmds[n] = o; } }, { agentDir, fetch: (r) => s.connect.router.fetch(r) });
   const ctx = { ui: { notify: (m: string, l?: string) => notes.push(`${l}: ${m}`) } };
-  await cmds.agent!.handler("layout  sync", ctx);
+  await cmds.agents!.handler("layout  sync", ctx);
   expect(YAML.parse(fs.readFileSync(file, "utf8")).task.agentModelOverrides.task).toBe("cgs-openai/deepseek-x:max");
   expect(JSON.parse(fs.readFileSync(state, "utf8")).layoutTakeover).toBeUndefined();
   expect(notes[0]).toStartWith("info:");
-  await cmds.agent!.handler("layout", ctx);
-  expect(notes[1]).toContain("usage: /agent layout sync");
+  await cmds.agents!.handler("layout", ctx);
+  expect(notes[1]).toContain("usage: /agents layout sync");
   s.connect.stop();
 });
 
