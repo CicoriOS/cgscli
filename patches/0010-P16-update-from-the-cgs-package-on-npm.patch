@@ -1,7 +1,7 @@
-From 87a742efa93f6bdbac5e9241cc5e8fabe32204d8 Mon Sep 17 00:00:00 2001
+From f49e0ab12bbae7106a407e62667ac2b69e8a62a5 Mon Sep 17 00:00:00 2001
 From: cgscli <cgscli@localhost>
 Date: Thu, 26 Nov 2026 22:53:29 +0800
-Subject: [PATCH 10/12] P16: update from the cgs package on npm
+Subject: [PATCH 10/13] P16: update from the cgs package on npm
 
 Reason: A CGS build must update from its own release, never from omp's channels (they would replace it with upstream omp). The source, the installer and the verification are inside update-cli and the startup check, which the extension API cannot reach.
 Upstream: none (distribution-specific update source)
@@ -11,20 +11,21 @@ Remove-when: CGS stops shipping a branded omp build
 - `cgs update` and `--check`: compare with the running version, install the release tarball with `bun install -g --registry=<answering registry>`, verify through the `cgs` launcher
 - startup check and auto-update offer only that release; the notice says `cgs update`
 - replaces the P4 gate that disabled updating unless PI_BUILD_URL was set
+- the recovery hint of a failed verification is `bun install -g @cicori/cgs`: omp's own installer (omp.sh) would put upstream omp on the PATH
 ---
- packages/coding-agent/src/cli/cgs-release.ts  | 66 +++++++++++++++
- packages/coding-agent/src/cli/update-cli.ts   | 84 +++++++++----------
+ packages/coding-agent/src/cli/cgs-release.ts  | 66 +++++++++++++
+ packages/coding-agent/src/cli/update-cli.ts   | 95 +++++++++----------
  packages/coding-agent/src/main.ts             | 23 ++---
  .../src/modes/interactive/update-notice.tsx   |  2 +-
- .../coding-agent/test/cgs-release.test.ts     | 54 ++++++++++++
- packages/coding-agent/test/update-cli.test.ts | 16 ++--
- 6 files changed, 176 insertions(+), 69 deletions(-)
+ .../coding-agent/test/cgs-release.test.ts     | 54 +++++++++++
+ packages/coding-agent/test/update-cli.test.ts | 47 ++-------
+ 6 files changed, 180 insertions(+), 107 deletions(-)
  create mode 100644 packages/coding-agent/src/cli/cgs-release.ts
  create mode 100644 packages/coding-agent/test/cgs-release.test.ts
 
 diff --git a/packages/coding-agent/src/cli/cgs-release.ts b/packages/coding-agent/src/cli/cgs-release.ts
 new file mode 100644
-index 0000000000..e51d777e5f
+index 0000000..e51d777
 --- /dev/null
 +++ b/packages/coding-agent/src/cli/cgs-release.ts
 @@ -0,0 +1,66 @@
@@ -95,14 +96,14 @@ index 0000000000..e51d777e5f
 +	}
 +}
 diff --git a/packages/coding-agent/src/cli/update-cli.ts b/packages/coding-agent/src/cli/update-cli.ts
-index 9a2f5c55c1..ea707945ba 100644
+index 9a2f5c5..2032174 100644
 --- a/packages/coding-agent/src/cli/update-cli.ts
 +++ b/packages/coding-agent/src/cli/update-cli.ts
 @@ -42,6 +42,7 @@ import {
  	fetchBuild,
  	type UpdateChannel,
  } from "./build-service";
-+import { type CgsRelease, fetchCgsRelease } from "./cgs-release";
++import { CGS_PACKAGE, type CgsRelease, fetchCgsRelease } from "./cgs-release";
  import { managedInstallName } from "./managed-install";
  import {
  	DEFAULT_NPM_REGISTRY,
@@ -115,7 +116,27 @@ index 9a2f5c55c1..ea707945ba 100644
  	if (!ompPath) return { ok: false };
  	const binaryPath = tryRealpath(ompPath) ?? ompPath;
  	return await verifyBinaryAtPath(binaryPath, expectedVersion);
-@@ -2320,59 +2321,56 @@ async function runManagedUpdate(
+@@ -2066,16 +2067,11 @@ export async function updateViaShimTakeover(
+ }
+ 
+ /**
+- * Platform-appropriate installer one-liner for recovery instructions.
+- *
+- * Forces the installer's binary mode (`--binary` / `-Binary`): the default
+- * mode prefers a bun-based install whenever bun is present, which would send
+- * a user recovering from a binary-only release straight back through bun.
++ * Recovery instruction when an update cannot be verified: reinstall the cgs package from npm. omp's own installer
++ * (omp.sh) would put upstream omp, not this build, on the user's PATH.
+  */
+ function installerHint(): string {
+-	return process.platform === "win32"
+-		? "& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary"
+-		: "curl -fsSL https://omp.sh/install | sh -s -- --binary";
++	return `bun install -g ${CGS_PACKAGE}`;
+ }
+ 
+ /** Persisted channel, or undefined when settings are unavailable (SDK/test embedding without `Settings.init()`). */
+@@ -2320,59 +2316,56 @@ async function runManagedUpdate(
  }
  
  /**
@@ -215,7 +236,7 @@ index 9a2f5c55c1..ea707945ba 100644
  
  /**
 diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
-index 545f688a32..a461de03ab 100644
+index 545f688..a461de0 100644
 --- a/packages/coding-agent/src/main.ts
 +++ b/packages/coding-agent/src/main.ts
 @@ -22,7 +22,7 @@ import {
@@ -272,7 +293,7 @@ index 545f688a32..a461de03ab 100644
  	} catch {
  		return undefined;
 diff --git a/packages/coding-agent/src/modes/interactive/update-notice.tsx b/packages/coding-agent/src/modes/interactive/update-notice.tsx
-index b606fa44e6..92349efda7 100644
+index b606fa4..92349ef 100644
 --- a/packages/coding-agent/src/modes/interactive/update-notice.tsx
 +++ b/packages/coding-agent/src/modes/interactive/update-notice.tsx
 @@ -10,7 +10,7 @@ import { bold } from "@oh-my-pi/pi-tui/theme/theme";
@@ -286,7 +307,7 @@ index b606fa44e6..92349efda7 100644
  	const prefix = `New version ${props.version} is available. Run: `;
 diff --git a/packages/coding-agent/test/cgs-release.test.ts b/packages/coding-agent/test/cgs-release.test.ts
 new file mode 100644
-index 0000000000..592f667f47
+index 0000000..592f667
 --- /dev/null
 +++ b/packages/coding-agent/test/cgs-release.test.ts
 @@ -0,0 +1,54 @@
@@ -345,10 +366,57 @@ index 0000000000..592f667f47
 +	});
 +});
 diff --git a/packages/coding-agent/test/update-cli.test.ts b/packages/coding-agent/test/update-cli.test.ts
-index 62cd2dc664..86d80b409b 100644
+index 62cd2dc..4ecf607 100644
 --- a/packages/coding-agent/test/update-cli.test.ts
 +++ b/packages/coding-agent/test/update-cli.test.ts
-@@ -1710,23 +1710,23 @@ describe("update-cli concurrent binary updates", () => {
+@@ -85,18 +85,6 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
+ 	}
+ }
+ 
+-/** Async {@link withPlatform}: keeps the override until the returned promise settles. */
+-async function withPlatformAsync<T>(platform: NodeJS.Platform, fn: () => Promise<T>): Promise<T> {
+-	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+-	if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+-	Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+-	try {
+-		return await fn();
+-	} finally {
+-		Object.defineProperty(process, "platform", platformDescriptor);
+-	}
+-}
+-
+ /** A checked build service answer offering `content` as `version`, without a patch unless overridden. */
+ function buildAnswer(version: string, content: string | Uint8Array, overrides: Partial<BuildAnswer> = {}): BuildAnswer {
+ 	return {
+@@ -870,26 +858,9 @@ describe("migrateRenamedInstall transaction", () => {
+ 		vi.spyOn(console, "log").mockImplementation(() => {});
+ 		const { steps, calls } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+ 
+-		await withPlatformAsync("linux", async () => {
+-			await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("curl -fsSL https://omp.sh/install");
+-		});
++		await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("bun install -g @cicori/cgs");
+ 		expect(calls).toEqual(["install", "removeOld", "verify", "install", "verify"]);
+ 	});
+-
+-	it("uses the platform-aware PowerShell reinstall hint on Windows", async () => {
+-		vi.spyOn(console, "log").mockImplementation(() => {});
+-		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+-		if (!platformDescriptor) throw new Error("process.platform descriptor missing");
+-		Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
+-		try {
+-			const { steps } = scriptedSteps({ install: [0, 0], verify: [false, false] });
+-			const promise = migrateRenamedInstall(release, steps);
+-			await expect(promise).rejects.toThrow("irm https://omp.sh/install.ps1");
+-			await expect(promise).rejects.not.toThrow("| sh");
+-		} finally {
+-			Object.defineProperty(process, "platform", platformDescriptor);
+-		}
+-	});
+ });
+ 
+ describe("update-cli bun install command", () => {
+@@ -1710,23 +1681,23 @@ describe("update-cli concurrent binary updates", () => {
  });
  
  describe("verifyInstalledVersion", () => {
