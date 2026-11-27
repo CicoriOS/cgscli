@@ -260,6 +260,19 @@ describe("frame passthrough", () => {
     expect(link.frames).not.toContain("not json");
     expect((await call(host, id, link, { type: "get_state" })).success).toBe(true);
   });
+
+  test("a response over the protocol v1 limit reaches the socket whole: the child is asked for v2 and its chunks are reassembled", async () => {
+    const host = makeHost(sb);
+    const { id, link } = await openAttached(host, sb.workspace("big"));
+    expect((await logTypes(host, id, link))[0]).toBe("negotiate_protocol");
+
+    // 1.5 M two-byte characters: 3 MiB of JSON in 12 chunks, with chunk edges inside characters.
+    const chars = 1_500_000;
+    const res = await call(host, id, link, { type: "get_big", chars });
+    expect(res.success).toBe(true);
+    expect(res.data.text).toBe("é".repeat(chars));
+    expect(link.frames.some((line) => line.startsWith('{"type":"rpc_chunk"'))).toBe(false);
+  });
 });
 
 describe("bridge snapshot", () => {

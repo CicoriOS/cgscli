@@ -5,8 +5,11 @@
 //   "hold"   stays busy (with a partial assistant message and a queue update) until `finish`
 // Other commands: get_state, switch_session (refuses paths containing "refuse"), get_entries (fails for
 // since "bad"), set_thinking_level, ask (raises a confirm dialog), extension_ui_response (no reply, as omp),
-// get_log (every command received so far), noise (a non-JSON stdout line), crash (exits with code 3 at once).
+// negotiate_protocol (switches later output to protocol v2), get_big (a response of `chars` two-byte characters: under v2
+// as rpc_chunk lines, under v1 the transport-limit error, as omp does), get_log (every command received so far), noise
+// (a non-JSON stdout line), crash (exits with code 3 at once).
 // Output goes through writeSync, so each line is written before any exit.
+import { Buffer } from "node:buffer";
 import fs from "node:fs";
 import readline from "node:readline";
 
@@ -17,6 +20,7 @@ const received: Cmd[] = [];
 let sessionFile: string | undefined;
 let thinking = "high";
 let active: Turn | undefined;
+let v2 = false;
 
 const write = (frame: Record<string, unknown>): void => {
   fs.writeSync(1, `${JSON.stringify(frame)}\n`);
@@ -100,6 +104,20 @@ function handle(cmd: Cmd): void {
       return ok(cmd);
     case "crash":
       process.exit(3);
+    case "negotiate_protocol":
+      v2 = true;
+      return ok(cmd, { protocolVersion: 2 });
+    case "get_big": {
+      const json = JSON.stringify({ type: "response", command: cmd.type, id: cmd.id, success: true, data: { text: "é".repeat(Number(cmd.chars)) } });
+      if (!v2) return fail(cmd, "RPC response exceeded the transport limit");
+      const bytes = Buffer.from(json, "utf8");
+      const size = 256 * 1024;
+      const count = Math.ceil(bytes.byteLength / size);
+      for (let index = 0; index < count; index++) {
+        write({ type: "rpc_chunk", chunkId: "rpc-1", index, count, byteLength: bytes.byteLength, data: bytes.subarray(index * size, (index + 1) * size).toString("base64") });
+      }
+      return;
+    }
     default:
       return fail(cmd, `unknown command ${cmd.type}`);
   }

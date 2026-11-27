@@ -5,6 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { UNKNOWN_CHILD_REASON } from "../wire/index.ts";
+import { CHUNK_LINE_PREFIX, ChunkAssembler } from "./chunks.ts";
 import { createStore, type Store } from "./store.ts";
 
 export type { Completion, SessionRow, Sessions, Store, Workspace } from "./store.ts";
@@ -315,13 +316,22 @@ export function createHost(opts: HostOptions): Host {
     void (async () => {
       try {
         const decoder = new TextDecoder();
+        const chunks = new ChunkAssembler();
         let rest = "";
         for await (const chunk of proc.stdout) {
           rest += decoder.decode(chunk, { stream: true });
           for (let i = rest.indexOf("\n"); i >= 0; i = rest.indexOf("\n")) {
             const line = rest.slice(0, i);
             rest = rest.slice(i + 1);
-            if (line.trim()) publish(child, line);
+            if (!line.trim()) continue;
+            if (line.startsWith(CHUNK_LINE_PREFIX)) {
+              const whole = chunks.push(line);
+              if (whole !== undefined) publish(child, whole);
+            } else if (chunks.open) {
+              throw new Error("a line arrived in the middle of a chunked frame");
+            } else {
+              publish(child, line);
+            }
           }
         }
       } catch (e) {
@@ -360,6 +370,8 @@ export function createHost(opts: HostOptions): Host {
     fs.mkdirSync(cwd, { recursive: true });
     const child = spawn(cwd, sessionPath);
     try {
+      // Before anything else: under protocol v1 a response over 1 MiB (a long session's entries) fails with "RPC response exceeded the transport limit".
+      await rpc(child, "negotiate_protocol", { protocolVersion: 2 });
       if (sessionPath && (await rpc(child, "switch_session", { sessionPath }))?.cancelled) throw new ApiError("Switch cancelled", 409);
       await rpc(child, "get_state");
       await child.binding;
