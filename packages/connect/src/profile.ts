@@ -5,6 +5,14 @@ export const CONFIG_DIR_NAME = ".cgs";
 /** Variables never inherited into omp: user omp config, AppImage launcher state. */
 export const FOREIGN_ENV = /^(PI_|OMP_|APPDIR$|APPIMAGE$|ARGV0$|OWD$)/i;
 
+/**
+ * The cgs daemon's runtime directory. cgs names its daemon apart from stock omp (CGS_DAEMON_DIR, `__cgs_worker_daemon`, patch P18), and
+ * pins it here, in its own config root, so that restarting one product's daemon never reaches the other's, whatever either shell inherited.
+ */
+export function daemonDir(home: string = os.homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(home, env.PI_CONFIG_DIR?.trim() || CONFIG_DIR_NAME, "run", "daemon");
+}
+
 export interface ProfileOptions {
   agentDir: string;
   ompBin: string;
@@ -40,6 +48,7 @@ export function buildProfile(o: ProfileOptions): Profile {
   env.PI_CONFIG_DIR = CONFIG_DIR_NAME;
   env.PI_NATIVES_DIR = path.join(home, CONFIG_DIR_NAME, "natives");
   env.PI_CODING_AGENT_DIR = o.agentDir;
+  env.CGS_DAEMON_DIR = daemonDir(home, { PI_CONFIG_DIR: CONFIG_DIR_NAME });
 
   const args: string[] = [];
   if (o.overlayPath) args.push("--config", o.overlayPath);

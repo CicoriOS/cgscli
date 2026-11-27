@@ -33,8 +33,8 @@ const server = Bun.serve({
   },
 });
 
-async function run(command: string[], env: Record<string, string>) {
-  const proc = Bun.spawn(command, { env, stdout: "pipe", stderr: "pipe" });
+async function run(command: string[], env: Record<string, string>, timeout?: number) {
+  const proc = Bun.spawn(command, { env, stdout: "pipe", stderr: "pipe", ...(timeout ? { timeout, killSignal: "SIGKILL" as const } : {}) });
   const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
   if (code !== 0) throw new Error(`${command.join(" ")} exited ${code}\n${out}\n${err}`);
   return out;
@@ -48,6 +48,10 @@ try {
   const cgs = path.join(bunInstall, "bin/cgs");
   const version = (await run([cgs, "--version"], env)).trim();
   if (!/^cgs\/\d+\.\d+\.\d+-cgs\.\d+(\.\d+)?$/.test(version)) throw new Error(`unexpected version: ${version}`);
+
+  // The daemon runs under cgs's own names (P18). A selector the worker host does not recognize would start a full CLI that spawns the daemon again, without end.
+  const daemon = await run([cgs, "--smoke-test"], env, 120_000);
+  if (!daemon.includes("smoke-test: ok")) throw new Error(`cgs --smoke-test did not report ok:\n${daemon}`);
 
   await mkdir(path.join(agentDir, "cgs"), { recursive: true });
   await writeFile(path.join(agentDir, "models.yml"), "providers:\n  fake:\n    baseUrl: http://127.0.0.1:9/v1\n    apiKey: x\n    api: openai-completions\n    models:\n      - id: echo\n        name: Echo\n        contextWindow: 32000\n        maxTokens: 4096\n");
@@ -80,7 +84,7 @@ try {
 
   const config = await readFile(path.join(agentDir, "config.yml"), "utf8");
   if (!config.includes("cgs-openai/echo")) throw new Error(`/agents layout sync answered "${message}" but config.yml has no layout:\n${config}`);
-  console.log(`smoke ok: ${version}; /agents layout sync wrote the cloud layout (${message})`);
+  console.log(`smoke ok: ${version}; daemon starts; /agents layout sync wrote the cloud layout (${message})`);
 } catch (error) {
   console.error(`smoke FAILED: ${error instanceof Error ? error.message : String(error)}\n--- log\n${log.slice(-40).join("\n")}`);
   process.exitCode = 1;

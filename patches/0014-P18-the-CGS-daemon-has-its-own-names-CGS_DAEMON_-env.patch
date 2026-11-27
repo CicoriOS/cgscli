@@ -1,0 +1,251 @@
+From b1d7bce6a3d70651f3c518011c1359c1176e338e Mon Sep 17 00:00:00 2001
+From: Creeper23456 <Creeper23456@outlook.com>
+Date: Fri, 27 Nov 2026 13:48:32 +0800
+Subject: [PATCH] P18: the CGS daemon has its own names: CGS_DAEMON_*
+ environment variables and a __cgs_worker_daemon selector
+
+Reason: A machine can run stock omp and cgs side by side. Both daemons carried the same names (`__omp_worker_daemon` on the command line, `OMP_DAEMON_DIR`, `OMP_DAEMON_TCP`, `OMP_DAEMON_RESUME` in the environment), so a pattern match (`pkill -f omp_worker_daemon`), an inherited `OMP_DAEMON_DIR` from a stock omp shell, or a stray `OMP_DAEMON_TCP` pointed one product's restart (or its clients) at the other's daemon. cgs launches its daemon in its own directory under its own names, so restarting it never touches omp's.
+Upstream: none (distribution-specific names)
+Remove-when: CGS stops shipping a branded omp build
+
+- daemon/protocol.ts: DAEMON_WORKER_ARG is `__cgs_worker_daemon`; DAEMON_DIR_ENV, DAEMON_TCP_ENV and DAEMON_RESUME_ENV are `CGS_DAEMON_DIR`, `CGS_DAEMON_TCP`, `CGS_DAEMON_RESUME`. Every use goes through these constants, so client, server and the CLI selector stay in step
+- pi-utils worker-host.ts: isWorkerHostSelector also accepts the `__cgs_worker_` prefix. Without it the renamed daemon is not recognized as a worker, starts as a full CLI, and spawns the daemon again without end
+- the two test-only grace knobs (`OMP_DAEMON_*_GRACE_MS`) and the Rust IPC endpoint stem are unchanged: the endpoint lives under the daemon directory, which cgscli pins to ~/.cgs/run/daemon through CGS_DAEMON_DIR
+- tests and fixtures that set the old names follow
+---
+ packages/coding-agent/src/daemon/client.ts                | 2 +-
+ packages/coding-agent/src/daemon/paths.ts                 | 4 ++--
+ packages/coding-agent/src/daemon/protocol.ts              | 8 ++++----
+ packages/coding-agent/src/daemon/server.ts                | 2 +-
+ packages/coding-agent/test/daemon/infer-module.test.ts    | 4 ++--
+ packages/coding-agent/test/daemon/reexec.test.ts          | 2 +-
+ packages/coding-agent/test/fixtures/daemon-harness.ts     | 4 ++--
+ .../coding-agent/test/fixtures/daemon-proc-harness.ts     | 4 ++--
+ .../coding-agent/test/fixtures/fake-language-server.ts    | 4 ++--
+ .../test/fixtures/infer-pending-reply-client.ts           | 2 +-
+ .../coding-agent/test/mcp-host/integration-reexec.test.ts | 2 +-
+ packages/utils/src/worker-host.ts                         | 5 ++++-
+ packages/utils/test/worker-host.test.ts                   | 2 ++
+ 13 files changed, 25 insertions(+), 20 deletions(-)
+
+diff --git a/packages/coding-agent/src/daemon/client.ts b/packages/coding-agent/src/daemon/client.ts
+index de09e4d..7ac1d28 100644
+--- a/packages/coding-agent/src/daemon/client.ts
++++ b/packages/coding-agent/src/daemon/client.ts
+@@ -1181,7 +1181,7 @@ const SMOKE_DAEMON_EXIT_MS = 10_000;
+ 
+ /**
+  * Point every daemon use of this process at a fresh private runtime dir (and
+- * off any `OMP_DAEMON_TCP`), for the distribution smoke test. The returned
++ * off any `CGS_DAEMON_TCP`), for the distribution smoke test. The returned
+  * cleanup closes the shared client, shuts that daemon down, restores the
+  * environment, and removes the dir.
+  */
+diff --git a/packages/coding-agent/src/daemon/paths.ts b/packages/coding-agent/src/daemon/paths.ts
+index 00489f3..647fb38 100644
+--- a/packages/coding-agent/src/daemon/paths.ts
++++ b/packages/coding-agent/src/daemon/paths.ts
+@@ -5,7 +5,7 @@ import { ipcEndpoint } from "@oh-my-pi/pi-natives";
+ import { getDaemonDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
+ import { DAEMON_DIR_ENV, DAEMON_TCP_ENV } from "./protocol";
+ 
+-/** Runtime directory of the daemon: `OMP_DAEMON_DIR`, else the profile-independent `run/daemon`. */
++/** Runtime directory of the daemon: `CGS_DAEMON_DIR`, else the profile-independent `run/daemon`. */
+ export function daemonDir(): string {
+ 	return process.env[DAEMON_DIR_ENV] || getDaemonDir();
+ }
+@@ -49,7 +49,7 @@ export function moduleStateDir(kind: string): string {
+ 	return path.join(daemonDir(), "modules", kind);
+ }
+ 
+-/** Loopback TCP address from `OMP_DAEMON_TCP=host:port`; undefined when unset. Throws when malformed. */
++/** Loopback TCP address from `CGS_DAEMON_TCP=host:port`; undefined when unset. Throws when malformed. */
+ export function daemonTcpAddress(): { host: string; port: number } | undefined {
+ 	const raw = process.env[DAEMON_TCP_ENV]?.trim();
+ 	if (!raw) return undefined;
+diff --git a/packages/coding-agent/src/daemon/protocol.ts b/packages/coding-agent/src/daemon/protocol.ts
+index 50e724a..7890fca 100644
+--- a/packages/coding-agent/src/daemon/protocol.ts
++++ b/packages/coding-agent/src/daemon/protocol.ts
+@@ -16,13 +16,13 @@ export type { DaemonRestartPolicy, ProcSpec, UnitPolicy, UnitScope, UnitSnapshot
+ /** Bumped only for incompatible control-protocol changes; ops are otherwise additive. */
+ export const DAEMON_PROTOCOL_VERSION = 1;
+ /** Hidden CLI selector that runs the daemon. */
+-export const DAEMON_WORKER_ARG = "__omp_worker_daemon";
++export const DAEMON_WORKER_ARG = "__cgs_worker_daemon";
+ /** `host:port`; makes the daemon listen on, and clients dial, loopback TCP instead of the local IPC endpoint. */
+-export const DAEMON_TCP_ENV = "OMP_DAEMON_TCP";
++export const DAEMON_TCP_ENV = "CGS_DAEMON_TCP";
+ /** Runtime directory override, for smoke tests and isolated consumers. */
+-export const DAEMON_DIR_ENV = "OMP_DAEMON_DIR";
++export const DAEMON_DIR_ENV = "CGS_DAEMON_DIR";
+ /** Set by a re-exec'ing daemon for its successor: path of nothing, presence means "restore from the store". */
+-export const DAEMON_RESUME_ENV = "OMP_DAEMON_RESUME";
++export const DAEMON_RESUME_ENV = "CGS_DAEMON_RESUME";
+ /** Fixed dimensions negotiated with every supervised PTY. */
+ export const DAEMON_PTY_COLUMNS = 120;
+ export const DAEMON_PTY_ROWS = 40;
+diff --git a/packages/coding-agent/src/daemon/server.ts b/packages/coding-agent/src/daemon/server.ts
+index 37660ce..25e77f7 100644
+--- a/packages/coding-agent/src/daemon/server.ts
++++ b/packages/coding-agent/src/daemon/server.ts
+@@ -1,5 +1,5 @@
+ /**
+- * The single per-user omp daemon process (`__omp_worker_daemon`): one
++ * The single per-user omp daemon process (`__cgs_worker_daemon`): one
+  * listener, hello/token auth, control-op dispatch into the {@link UnitTable},
+  * raw tunnels after `attach`, board/completion fan-out, idle exit, and in-place
+  * re-exec into a newer client's build on `upgrade`.
+diff --git a/packages/coding-agent/test/daemon/infer-module.test.ts b/packages/coding-agent/test/daemon/infer-module.test.ts
+index 27ee46b..89f49e9 100644
+--- a/packages/coding-agent/test/daemon/infer-module.test.ts
++++ b/packages/coding-agent/test/daemon/infer-module.test.ts
+@@ -261,9 +261,9 @@ describe("daemon infer module", () => {
+ 			const { unitId } = await openInfer(client, "embed:env", params);
+ 			const tunnel = await attach(client, unitId);
+ 			tunnel.send({ type: "env", id: "marker", name: "FAKE_INFER_MARKER" });
+-			tunnel.send({ type: "env", id: "daemon-dir", name: "OMP_DAEMON_DIR" });
++			tunnel.send({ type: "env", id: "daemon-dir", name: "CGS_DAEMON_DIR" });
+ 			expect((await tunnel.final("marker")).value).toBe("from-client");
+-			// The daemon itself runs with OMP_DAEMON_DIR set; it must not leak into the worker.
++			// The daemon itself runs with CGS_DAEMON_DIR set; it must not leak into the worker.
+ 			expect((await tunnel.final("daemon-dir")).value).toBeNull();
+ 		},
+ 		TEST_TIMEOUT_MS,
+diff --git a/packages/coding-agent/test/daemon/reexec.test.ts b/packages/coding-agent/test/daemon/reexec.test.ts
+index e950308..6314eeb 100644
+--- a/packages/coding-agent/test/daemon/reexec.test.ts
++++ b/packages/coding-agent/test/daemon/reexec.test.ts
+@@ -31,7 +31,7 @@ beforeEach(async () => {
+ });
+ 
+ // Past the harness's 10s lock wait: a daemon stuck mid-exec is killed before the next test swaps
+-// `OMP_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
++// `CGS_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
+ afterEach(async () => {
+ 	await harness.dispose();
+ }, 30_000);
+diff --git a/packages/coding-agent/test/fixtures/daemon-harness.ts b/packages/coding-agent/test/fixtures/daemon-harness.ts
+index df72c58..48c9cd6 100644
+--- a/packages/coding-agent/test/fixtures/daemon-harness.ts
++++ b/packages/coding-agent/test/fixtures/daemon-harness.ts
+@@ -1,8 +1,8 @@
+ /**
+  * Runs a real omp daemon in a private runtime dir for one test.
+  *
+- * `OMP_DAEMON_DIR` is the only seam the client and server share, so it is set
+- * (and `OMP_DAEMON_TCP` cleared) for the duration of one test and restored by
++ * `CGS_DAEMON_DIR` is the only seam the client and server share, so it is set
++ * (and `CGS_DAEMON_TCP` cleared) for the duration of one test and restored by
+  * `dispose()`, which also shuts the daemon down, kills any process the test
+  * tracked, and removes the dir.
+  */
+diff --git a/packages/coding-agent/test/fixtures/daemon-proc-harness.ts b/packages/coding-agent/test/fixtures/daemon-proc-harness.ts
+index 67ccc5b..ae5e71e 100644
+--- a/packages/coding-agent/test/fixtures/daemon-proc-harness.ts
++++ b/packages/coding-agent/test/fixtures/daemon-proc-harness.ts
+@@ -3,7 +3,7 @@
+  * connection to it, for tests of `proc` units, leases and the store.
+  *
+  * Nothing here touches `process.env` or `~/.omp`: the daemon runs as a child
+- * process whose env names the temp dir (`OMP_DAEMON_DIR`), and connections dial
++ * process whose env names the temp dir (`CGS_DAEMON_DIR`), and connections dial
+  * its endpoint and read its token directly. {@link TestDaemon.dispose} stops
+  * every unit it saw (detached ones outlive the daemon), shuts the daemon down,
+  * kills whatever survived, and deletes the dir.
+@@ -198,7 +198,7 @@ export class DaemonConn {
+ export class TestDaemon {
+ 	/** Temp root: `cwd` for units, stderr captures, and the daemon dir below it. */
+ 	readonly root: string;
+-	/** `OMP_DAEMON_DIR` of the daemon. */
++	/** `CGS_DAEMON_DIR` of the daemon. */
+ 	readonly dir: string;
+ 	readonly #env: Record<string, string>;
+ 	readonly #conns = new Set<DaemonConn>();
+diff --git a/packages/coding-agent/test/fixtures/fake-language-server.ts b/packages/coding-agent/test/fixtures/fake-language-server.ts
+index bc93e7b..81ff8b4 100644
+--- a/packages/coding-agent/test/fixtures/fake-language-server.ts
++++ b/packages/coding-agent/test/fixtures/fake-language-server.ts
+@@ -4,7 +4,7 @@
+  * private methods:
+  *
+  * - `fake/state` (request): pid, ppid, initialize count, open/closed documents,
+- *   every request id it received, and the `FAKE_LS_MARK` / `OMP_DAEMON_DIR`
++ *   every request id it received, and the `FAKE_LS_MARK` / `CGS_DAEMON_DIR`
+  *   values of its own environment.
+  * - `fake/echo` (request, `{ value, hold? }`): answers `{ value }`; with `hold`
+  *   the answer waits for a `fake/release` notification.
+@@ -98,7 +98,7 @@ async function handle(message: Message): Promise<void> {
+ 				requestIds,
+ 				env: {
+ 					mark: process.env.FAKE_LS_MARK ?? null,
+-					daemonDir: process.env.OMP_DAEMON_DIR ?? null,
++					daemonDir: process.env.CGS_DAEMON_DIR ?? null,
+ 				},
+ 			});
+ 			return;
+diff --git a/packages/coding-agent/test/fixtures/infer-pending-reply-client.ts b/packages/coding-agent/test/fixtures/infer-pending-reply-client.ts
+index 52dcd6d..e160798 100644
+--- a/packages/coding-agent/test/fixtures/infer-pending-reply-client.ts
++++ b/packages/coding-agent/test/fixtures/infer-pending-reply-client.ts
+@@ -4,7 +4,7 @@
+  * worker delays, prints the reply, and never closes anything. The process must
+  * stay alive for the reply, then exit on its own.
+  *
+- * Env: `FAKE_JSONL_WORKER` (worker script path), `OMP_DAEMON_DIR` (isolated daemon).
++ * Env: `FAKE_JSONL_WORKER` (worker script path), `CGS_DAEMON_DIR` (isolated daemon).
+  */
+ import * as path from "node:path";
+ import { InferConnection } from "../../src/daemon/modules/infer";
+diff --git a/packages/coding-agent/test/mcp-host/integration-reexec.test.ts b/packages/coding-agent/test/mcp-host/integration-reexec.test.ts
+index c488866..bc178fe 100644
+--- a/packages/coding-agent/test/mcp-host/integration-reexec.test.ts
++++ b/packages/coding-agent/test/mcp-host/integration-reexec.test.ts
+@@ -71,7 +71,7 @@ describe.skipIf(process.platform === "win32")("MCP across a daemon re-exec", ()
+ 	});
+ 
+ 	// Past the harness's 10s lock wait: a daemon stuck mid-exec is killed before the next test swaps
+-	// `OMP_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
++	// `CGS_DAEMON_DIR`, instead of a timed-out teardown restoring the env and removing the dir under it.
+ 	afterEach(async () => {
+ 		if (previousGrace === undefined) delete process.env[DAEMON_RESUME_LEASE_GRACE_ENV];
+ 		else process.env[DAEMON_RESUME_LEASE_GRACE_ENV] = previousGrace;
+diff --git a/packages/utils/src/worker-host.ts b/packages/utils/src/worker-host.ts
+index 3c6e45a..da49a33 100644
+--- a/packages/utils/src/worker-host.ts
++++ b/packages/utils/src/worker-host.ts
+@@ -3,6 +3,9 @@ import { stripWindowsExtendedLengthPathPrefix } from "./path";
+ /** Prefix reserved for argv selectors dispatched by the shared CLI worker host. */
+ export const WORKER_HOST_SELECTOR_PREFIX = "__omp_worker_";
+ 
++/** Prefix of the selectors CGS owns (P18): the CGS daemon is `__cgs_worker_daemon`. They dispatch through the same host. */
++export const CGS_WORKER_HOST_SELECTOR_PREFIX = "__cgs_worker_";
++
+ /**
+  * Selector of a shell process: `omp __omp_worker_shell_process [options] -- <command>` runs one
+  * command in the embedded shell as a process of its own (a named service, a pty command). The
+@@ -12,7 +15,7 @@ export const SHELL_PROCESS_SELECTOR = "__omp_worker_shell_process";
+ 
+ /** Whether an argv value selects a worker hosted by the shared CLI entrypoint. */
+ export function isWorkerHostSelector(value: string | undefined): value is string {
+-	return value?.startsWith(WORKER_HOST_SELECTOR_PREFIX) ?? false;
++	return (value?.startsWith(WORKER_HOST_SELECTOR_PREFIX) || value?.startsWith(CGS_WORKER_HOST_SELECTOR_PREFIX)) ?? false;
+ }
+ 
+ /**
+diff --git a/packages/utils/test/worker-host.test.ts b/packages/utils/test/worker-host.test.ts
+index c2fd449..165b96a 100644
+--- a/packages/utils/test/worker-host.test.ts
++++ b/packages/utils/test/worker-host.test.ts
+@@ -24,6 +24,8 @@ describe("worker-host selectors", () => {
+ 		expect(WORKER_HOST_SELECTOR_PREFIX).toBe("__omp_worker_");
+ 		expect(isWorkerHostSelector("__omp_worker_stats_sync")).toBeTrue();
+ 		expect(isWorkerHostSelector("__omp_worker_computer")).toBeTrue();
++		// P18: a selector that is not recognized would start a full CLI, which spawns the daemon again, without end.
++		expect(isWorkerHostSelector("__cgs_worker_daemon")).toBeTrue();
+ 		expect(isWorkerHostSelector("--version")).toBeFalse();
+ 		expect(isWorkerHostSelector(undefined)).toBeFalse();
+ 	});
+-- 
+2.47.3
+
