@@ -77,6 +77,7 @@ export function makeHost(sb: Sandbox, overrides: Partial<HostOptions> = {}): Hos
     attachGraceMs: 5_000,
     reapIntervalMs: 60_000,
     childLimit: 8,
+    titleChecksMs: [],
     ...overrides,
   });
   live.add(host);

@@ -39,6 +39,8 @@ export interface HostOptions {
   attachGraceMs?: number;
   reapIntervalMs?: number;
   rpcTimeoutMs?: number;
+  /** Gaps between the looks at a session file for the title omp generates after a turn; default 2 s, 6 s, 15 s. */
+  titleChecksMs?: number[];
   workspacesFile?: string;
   sessionsDir?: string;
 }
@@ -107,6 +109,8 @@ interface Child {
   rebinding?: Promise<void>;
   /** The latest session-file bind (path and title read from disk); a child is ready only once it settled. */
   binding?: Promise<void>;
+  /** A running watch for the generated title (see watchTitle). */
+  titleWatch?: Promise<void>;
   pending: Map<string, (response?: Frame) => void>;
 }
 
@@ -123,6 +127,8 @@ const MAX_PARTIAL_CHARS = 1024 * 1024;
 const TITLE_CHARS = 80;
 /** Methods of `extension_ui_request` a page answers with a dialog. */
 const DIALOG_METHODS: Record<string, true> = { form: true, select: true, confirm: true, input: true, editor: true };
+/** Settings a page-facing child runs with, as a `--config` overlay: the page has no Nerd Font, so a generated title's icon is an emoji. */
+const PAGE_SETTINGS = "title:\n  icons: emoji\n";
 const SESSION_SELECTION: Record<string, true> = { new_session: true, switch_session: true, open_session: true, branch: true };
 
 function textOf(content: unknown): string {
@@ -161,9 +167,13 @@ export function createHost(opts: HostOptions): Host {
   const attachGraceMs = opts.attachGraceMs ?? 5_000;
   const reapIntervalMs = opts.reapIntervalMs ?? 60_000;
   const rpcTimeoutMs = opts.rpcTimeoutMs ?? 30_000;
+  const titleChecksMs = opts.titleChecksMs ?? [2_000, 6_000, 15_000];
   const defaultCwd = opts.defaultCwd ?? "";
   const store: Store = createStore({ agentDir: opts.agentDir, defaultCwd, workspacesFile: opts.workspacesFile, sessionsDir: opts.sessionsDir });
   const children = new Map<string, Child>();
+  const settingsFile = path.join(opts.agentDir, "cache", "host-settings.yml");
+  fs.mkdirSync(path.dirname(settingsFile), { recursive: true });
+  fs.writeFileSync(settingsFile, PAGE_SETTINGS);
   const opening = new Map<string, Promise<ChildStatus>>();
   const sockets = new Map<string, Socket>();
   let exiting = false;
@@ -195,6 +205,24 @@ export function createHost(opts: HostOptions): Host {
     return promise;
   }
 
+  /**
+   * omp names a session after its first turn and writes the name to the session file without sending any frame, so the
+   * page would show the first message until something else changed. Look again a few times after the turn and bump
+   * `updatedAt` when the title moved: the page re-reads its list when a child's `updatedAt` changes.
+   */
+  async function watchTitle(child: Child): Promise<void> {
+    for (const gap of titleChecksMs) {
+      await Bun.sleep(gap);
+      const file = child.status.sessionPath;
+      if (child.stopping || !file) return;
+      const title = await store.title(file).catch(() => undefined);
+      if (title && title !== child.status.title) {
+        child.status.title = title;
+        child.status.updatedAt = Date.now();
+      }
+    }
+  }
+
   async function setFile(child: Child, sessionFile: string): Promise<void> {
     const sessionPath = fileKey(sessionFile);
     if (child.status.sessionPath === sessionPath) return;
@@ -221,6 +249,9 @@ export function createHost(opts: HostOptions): Host {
       if (s.ring !== "idle") {
         s.unseen = child.sockets.size === 0;
         s.updatedAt = child.idleSince = Date.now();
+        child.titleWatch ??= watchTitle(child).finally(() => {
+          child.titleWatch = undefined;
+        });
       }
       s.ring = "idle";
       child.partial = undefined;
@@ -295,7 +326,15 @@ export function createHost(opts: HostOptions): Host {
   function spawn(cwd: string, requestedPath?: string): Child {
     const proc = Bun.spawn(opts.command, {
       cwd,
-      env: { ...process.env, ...opts.env, PI_CODING_AGENT_DIR: opts.agentDir },
+      // The page shows omp's generated titles: opt in to generating them (PI_RPC_TITLE) and to the event that announces one (PI_RPC_EMIT_TITLE).
+      env: {
+        ...process.env,
+        PI_RPC_TITLE: "1",
+        PI_RPC_EMIT_TITLE: "1",
+        PI_CONFIG_FILES: [process.env.PI_CONFIG_FILES, settingsFile].filter(Boolean).join(path.delimiter),
+        ...opts.env,
+        PI_CODING_AGENT_DIR: opts.agentDir,
+      },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "inherit",

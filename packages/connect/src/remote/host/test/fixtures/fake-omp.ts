@@ -104,6 +104,8 @@ function handle(cmd: Cmd): void {
       return ok(cmd);
     case "crash":
       process.exit(3);
+    case "get_env":
+      return ok(cmd, { env: { PI_RPC_TITLE: process.env.PI_RPC_TITLE, PI_RPC_EMIT_TITLE: process.env.PI_RPC_EMIT_TITLE, PI_CONFIG_FILES: process.env.PI_CONFIG_FILES } });
     case "negotiate_protocol":
       v2 = true;
       return ok(cmd, { protocolVersion: 2 });

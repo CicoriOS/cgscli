@@ -273,6 +273,32 @@ describe("frame passthrough", () => {
     expect(res.data.text).toBe("é".repeat(chars));
     expect(link.frames.some((line) => line.startsWith('{"type":"rpc_chunk"'))).toBe(false);
   });
+
+  test("a child is started for a page: generated titles are on, announced, and headed by an emoji", async () => {
+    const host = makeHost(sb);
+    const { id, link } = await openAttached(host, sb.workspace("titles"));
+    const { env } = (await call(host, id, link, { type: "get_env" })).data;
+    expect(env.PI_RPC_TITLE).toBe("1");
+    expect(env.PI_RPC_EMIT_TITLE).toBe("1");
+    expect(fs.readFileSync(env.PI_CONFIG_FILES.split(path.delimiter).at(-1), "utf8")).toBe("title:\n  icons: emoji\n");
+  });
+
+  test("the title omp writes after a turn reaches the child's status without any frame, so the page re-reads its list", async () => {
+    const ws = sb.workspace("named");
+    const file = sb.session("named-dir", "named.jsonl", [header("s-named", ws), userLine("fix the flaky park tests")], 1000);
+    const host = makeHost(sb, { titleChecksMs: [50, 50] });
+    const child = childOf((await openChild(host, ws, file)).body);
+    const link = attach(host, child.id);
+    await until(() => link.state === "open", "socket open");
+    expect(child.title).toBe("fix the flaky park tests");
+    const before = (await statusOf(host, child.id)).updatedAt;
+
+    await call(host, child.id, link, { type: "prompt", message: "quick", id: "p1" });
+    fs.appendFileSync(file, `${JSON.stringify(titleLine("🅿️ PARK: Fix flaky park tests"))}\n`); // what omp does a moment after the turn
+
+    await until(async () => (await statusOf(host, child.id)).title === "🅿️ PARK: Fix flaky park tests", "the generated title");
+    expect((await statusOf(host, child.id)).updatedAt).toBeGreaterThan(before);
+  });
 });
 
 describe("bridge snapshot", () => {
