@@ -201,8 +201,15 @@ test("a live terminal uses its lease and the wire revokes the browser, not the r
   await page.say({ k: "open", cid: "c1", path: "/ws?child=live%3Atest" });
   expect(writes).toEqual(['{"type":"remote_attached"}\n']);
   publish({ type: "live_ready" });
+  const negotiate = { type: "negotiate_protocol", id: "cgs-live-protocol-v2", protocolVersion: 2 };
+  expect(writes.at(-1)).toBe(`>${JSON.stringify(negotiate)}\n`);
+  // The browser's frame waits until the terminal has answered, so its first response already uses protocol v2.
   await page.say({ k: "frame", cid: "c1", text: '{"type":"get_state"}' });
+  expect(writes.at(-1)).toBe(`>${JSON.stringify(negotiate)}\n`);
+  publish({ type: "response", command: "negotiate_protocol", id: "cgs-live-protocol-v2", success: true, data: { protocolVersion: 2 } });
   expect(writes.at(-1)).toBe('>{"type":"get_state"}\n');
+  await page.pump();
+  expect(page.messages.some((m) => m.k === "frame" && m.text.includes("negotiate_protocol"))).toBe(false);
   publish({ type: "agent_start" });
   publish({ type: "taken_over" });
   await page.pump();
@@ -215,6 +222,50 @@ test("a live terminal uses its lease and the wire revokes the browser, not the r
   expect(writes.length).toBe(count);
   await w.unit.disable();
   expect(closed).toBe(true);
+});
+
+describe("a live terminal's large responses", () => {
+  async function liveStream() {
+    const w = await enabledWorld();
+    let data!: (chunk: Uint8Array) => void;
+    const writes: string[] = [];
+    w.unit.attachLive({
+      start(onData) { data = onData; },
+      send(line) { writes.push(String(line)); return true; },
+      close() {},
+    }, "live:big");
+    const publish = (f: object) => data(new TextEncoder().encode(`${JSON.stringify(f)}\n`));
+    publish({ type: "live_hello", cwd: "/workspace", sessionPath: "/sessions/big.jsonl", updatedAt: 1 });
+    const page = new Browser(w.links[0]!, "remote", new MemoryStore(), "Phone", PASSWORD);
+    await page.connect();
+    await page.say({ k: "open", cid: "c1", path: "/ws?child=live%3Abig" });
+    publish({ type: "live_ready" });
+    publish({ type: "response", command: "negotiate_protocol", id: "cgs-live-protocol-v2", success: true, data: { protocolVersion: 2 } });
+    return { page, publish, writes };
+  }
+
+  test("a response the terminal sends in chunks reaches the browser as one frame", async () => {
+    const { page, publish } = await liveStream();
+    const whole = JSON.stringify({ type: "response", command: "get_entries", id: "e1", success: true, data: { entries: [{ text: "é".repeat(400_000) }] } });
+    const bytes = Buffer.from(whole);
+    const size = 256 * 1024;
+    const count = Math.ceil(bytes.byteLength / size);
+    for (let index = 0; index < count; index++) {
+      publish({ type: "rpc_chunk", chunkId: "c1", index, count, byteLength: bytes.byteLength, data: bytes.subarray(index * size, (index + 1) * size).toString("base64") });
+    }
+    await page.pump();
+    const frames = page.messages.flatMap((m) => (m.k === "frame" ? [m.text] : []));
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toBe(whole);
+  });
+
+  test("a broken chunk sequence closes the browser stream and detaches the terminal", async () => {
+    const { page, publish, writes } = await liveStream();
+    publish({ type: "rpc_chunk", chunkId: "c1", index: 1, count: 2, byteLength: 10, data: "AAAA" });
+    await page.pump();
+    expect(writes.at(-1)).toBe('{"type":"remote_detached"}\n');
+    expect(page.got("close")).toMatchObject({ cid: "c1" });
+  });
 });
 
 describe("the proxy", () => {

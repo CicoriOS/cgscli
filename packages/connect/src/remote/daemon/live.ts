@@ -2,6 +2,7 @@
 // attached to the unit through the daemon tunnel. The tunnel is the registration, so no child process is created for it.
 // The TUI's first line is its `live_hello` (cwd, session file, title): until then it is not listed or routable. Browsers
 // reach a live entry by its `live:<id>` child id, or by the session file it is running (no duplicate child is spawned).
+import { CHUNK_LINE_PREFIX, ChunkAssembler } from "../host/chunks.ts";
 import type { ChildStatus, SocketHandlers } from "../host/index.ts";
 
 export const LIVE_PREFIX = "live:";
@@ -16,6 +17,9 @@ export const REMOTE_DETACHED_LINE = '{"type":"remote_detached"}';
 export const LIVE_READY_LINE = '{"type":"live_ready"}';
 export const LIVE_BUSY_LINE = '{"type":"live_busy"}';
 export const RPC_INPUT_PREFIX = ">";
+/** The id of the `negotiate_protocol` request the registry sends a TUI itself; its response never reaches a browser. */
+export const LIVE_NEGOTIATE_ID = "cgs-live-protocol-v2";
+const INVALID_CHUNKS_REASON = "The terminal sent an invalid chunked frame";
 
 /** The daemon tunnel as the unit sees it: bytes in, bytes out. */
 export interface LiveTunnel {
@@ -39,7 +43,17 @@ interface LiveEntry {
   id: string;
   tunnel: LiveTunnel;
   hello?: LiveHello;
-  socket?: { key: string; handlers: SocketHandlers; ready: boolean };
+  socket?: LiveSocket;
+}
+
+/** One browser stream on a TUI. `negotiated` turns true when the TUI answered the protocol request; browser frames wait for it. */
+interface LiveSocket {
+  key: string;
+  handlers: SocketHandlers;
+  ready: boolean;
+  negotiated: boolean;
+  held: string[];
+  chunks: ChunkAssembler;
 }
 
 /** Narrows one TUI line: a `live_hello` with the fields the PWA lists by. */
@@ -118,7 +132,7 @@ export class LiveRegistry {
     } else if (entry.socket) {
       handlers.onClose(key, "The terminal session already has a controller");
     } else {
-      entry.socket = { key, handlers, ready: false };
+      entry.socket = { key, handlers, ready: false, negotiated: false, held: [], chunks: new ChunkAssembler() };
       this.#keys.set(key, entry);
       entry.tunnel.send(`${REMOTE_ATTACHED_LINE}\n`);
     }
@@ -130,7 +144,11 @@ export class LiveRegistry {
     const entry = this.#keys.get(key);
     if (!entry) return false;
     const line = text.trimEnd();
-    if (entry.socket?.ready && !line.includes("\n")) entry.tunnel.send(`${RPC_INPUT_PREFIX}${line}\n`);
+    const socket = entry.socket;
+    if (socket?.ready && !line.includes("\n")) {
+      if (socket.negotiated) entry.tunnel.send(`${RPC_INPUT_PREFIX}${line}\n`);
+      else socket.held.push(line);
+    }
     return true;
   }
 
@@ -158,6 +176,10 @@ export class LiveRegistry {
       const socket = entry.socket;
       if (socket && !socket.ready) {
         socket.ready = true;
+        // Before the browser's first frame: under protocol v1 omp replaces a response over 1 MiB (a long session's
+        // get_entries) with "RPC response exceeded the transport limit". Under v2 it arrives as chunks, joined below.
+        const request = { type: "negotiate_protocol", id: LIVE_NEGOTIATE_ID, protocolVersion: 2 };
+        entry.tunnel.send(`${RPC_INPUT_PREFIX}${JSON.stringify(request)}\n`);
         socket.handlers.onOpen(socket.key);
       }
       return;
@@ -174,7 +196,38 @@ export class LiveRegistry {
       if (hello) entry.hello = hello;
       return;
     }
-    if (socket?.ready) socket.handlers.onFrame(socket.key, line);
+    if (!socket?.ready) return;
+    if (!socket.negotiated && line.includes(LIVE_NEGOTIATE_ID)) {
+      const answer = parseJson(line);
+      if (typeof answer === "object" && answer !== null && "type" in answer && answer.type === "response" && "id" in answer && answer.id === LIVE_NEGOTIATE_ID) {
+        // An older TUI refuses the command: the stream then stays on protocol v1.
+        socket.negotiated = true;
+        for (const held of socket.held.splice(0)) entry.tunnel.send(`${RPC_INPUT_PREFIX}${held}\n`);
+        return;
+      }
+    }
+    if (line.startsWith(CHUNK_LINE_PREFIX)) {
+      let whole: string | undefined;
+      try {
+        whole = socket.chunks.push(line);
+      } catch {
+        this.#abandon(entry, INVALID_CHUNKS_REASON);
+        return;
+      }
+      if (whole !== undefined) socket.handlers.onFrame(socket.key, whole);
+    } else if (socket.chunks.open) {
+      this.#abandon(entry, INVALID_CHUNKS_REASON);
+    } else {
+      socket.handlers.onFrame(socket.key, line);
+    }
+  }
+
+  /** The TUI's stream is not a valid chunk sequence: the browser stream closes, the TUI leaves standby, its registration stays. */
+  #abandon(entry: LiveEntry, reason: string): void {
+    const socket = this.#removeSocket(entry);
+    if (!socket) return;
+    entry.tunnel.send(`${REMOTE_DETACHED_LINE}\n`);
+    socket.handlers.onClose(socket.key, reason);
   }
 
   /** The TUI handed the session to this terminal: browsers learn it by an explicit `taken_over`, not a silent drop. */
