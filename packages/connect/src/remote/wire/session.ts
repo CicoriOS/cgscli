@@ -2,12 +2,17 @@
 //
 // Two ways in, both over relay `data` payloads (the relay sees only these bytes):
 //
-//   first connection (the browser has the device password, no saved pin)
-//     B -> D  PW_START
-//     D -> B  PW_CHALLENGE  salt(16) nonce(16) shareB(65)       device SPAKE2 share
+//   first connection (no saved pin; the password may be asked for after the device key is shown)
+//     B -> D  PW_START      [PW_ANNOUNCE]                       the flag asks the device to announce its key
+//     D -> B  PW_CHALLENGE  salt(16) nonce(16) shareB(65) [pub(32)]   device SPAKE2 share; pub only when asked
+//                                                               (a device that predates the flag sends no pub)
 //     B -> D  PW_FINISH     shareA(65) noise-msg1               NNpsk0 with psk = SPAKE2 output
 //     D -> B  PW_REPLY      noise-msg2                          (or ERROR "bad_password")
-//     D -> B  DATA  {t:"device", pub}                           the device key the browser pins
+//     D -> B  DATA  {t:"device", pub}                           the device key the browser pins; must equal the announced one
+//
+// The announced `pub` is not authenticated: anyone on the path can put any key there. It lets the user compare the
+// fingerprint with the device terminal before typing the password. What stops an impostor is still the password
+// (PAKE); the browser rejects a session whose `device` key differs from the one it showed.
 //     B -> D  DATA  {t:"register", name, jwk}                   the browser's new non-extractable ECDSA key
 //     D -> B  DATA  {t:"registered", id}
 //
@@ -31,6 +36,7 @@ export type Via = "password" | "key";
 export type WireEvent =
   | { type: "authenticated"; via: Via; browser: { id: string; name: string } }
   | { type: "registered"; browser: AuthorizedBrowser }
+  | { type: "challenged"; pin?: string } // browser: the device answered PW_START; `pin` is its announced key (absent on an older device). Call answer().
   | { type: "pinned"; pin: string }
   | { type: "pin_mismatch"; expected: string; received: string }
   | { type: "auth_failed"; via: Via; code: string }
@@ -46,6 +52,7 @@ export interface BrowserStore {
 }
 
 const PW_START = 0x01;
+const PW_ANNOUNCE = 0x01; // the byte after PW_START
 const PW_CHALLENGE = 0x02;
 const PW_FINISH = 0x03;
 const PW_REPLY = 0x04;
@@ -191,7 +198,8 @@ export class DeviceSession {
       const nonce = random(NONCE_BYTES);
       const pake = startPake("B", verifier.secret, concatBytes(salt, nonce));
       this.state = { s: "pw_challenge", pake, salt, nonce };
-      return { outgoing: [tagged(PW_CHALLENGE, salt, nonce, pake.share)], events: [] };
+      const announce = payload[1] === PW_ANNOUNCE ? [fromBase64(c.staticKey.publicKey)] : [];
+      return { outgoing: [tagged(PW_CHALLENGE, salt, nonce, pake.share, ...announce)], events: [] };
     }
     if (payload[0] === RESUME) {
       const noise = createNoise({ initiator: false, pattern: "NK", prologue: RESUME_PROLOGUE, staticPrivate: fromBase64(c.staticKey.privateKey) });
@@ -278,6 +286,7 @@ export class DeviceSession {
 type BrowserState =
   | { s: "idle" }
   | { s: "pw_wait" }
+  | { s: "pw_answer"; challenge: PasswordChallenge }
   | { s: "pw_reply"; noise: ReturnType<typeof createNoise> }
   | { s: "pw_device"; channel: Channel }
   | { s: "pw_registering"; channel: Channel; pin: string; keys: CryptoKeyPair; jwk: JsonWebKey }
@@ -287,11 +296,22 @@ type BrowserState =
   | { s: "authed"; channel: Channel; decoder: FrameDecoder }
   | { s: "dead" };
 
+/** What the device sent in PW_CHALLENGE, held until the password is known. `pin` is the announced device key (base64). */
+interface PasswordChallenge {
+  salt: Uint8Array;
+  nonce: Uint8Array;
+  shareB: Uint8Array;
+  pin?: string;
+}
+
 export interface BrowserSessionOptions {
   store: BrowserStore;
   /** What this browser calls itself on the device's authorized list. */
   name: string;
-  /** Needed only when the store has no saved record. Never persisted. */
+  /**
+   * Without a saved record: when given, the session answers the device's challenge by itself. When omitted, it stops at a
+   * `challenged` event (carrying the device key, so the user can check it first) and waits for `answer(password)`. Never persisted.
+   */
   password?: string;
 }
 
@@ -302,6 +322,8 @@ export interface BrowserSessionOptions {
 export class BrowserSession {
   private state: BrowserState = { s: "idle" };
   private saved: SavedBrowser | null = null;
+  /** The device key shown before the password, when the device announced one. */
+  private announced: Uint8Array | null = null;
 
   constructor(private readonly options: BrowserSessionOptions) {}
 
@@ -313,9 +335,15 @@ export class BrowserSession {
       this.state = { s: "resume_wait", noise, saved: this.saved };
       return { outgoing: [tagged(RESUME, noise.write())], events: [] };
     }
-    if (!this.options.password) throw new WireError("a password is needed for the first connection");
     this.state = { s: "pw_wait" };
-    return { outgoing: [Uint8Array.of(PW_START)], events: [] };
+    return { outgoing: [Uint8Array.of(PW_START, PW_ANNOUNCE)], events: [] };
+  }
+
+  /** Answers a `challenged` event with the device password. The password never leaves this call except as PAKE and Noise bytes. */
+  async answer(password: string): Promise<Step> {
+    const st = this.state;
+    if (st.s !== "pw_answer") throw new WireError("there is no challenge to answer");
+    return this.respond(st.challenge, password);
   }
 
   async receive(payload: Uint8Array): Promise<Step> {
@@ -326,6 +354,8 @@ export class BrowserSession {
     switch (st.s) {
       case "pw_wait":
         return this.passwordChallenge(payload);
+      case "pw_answer":
+        throw new WireError("the device sent data before the password was given");
       case "pw_reply":
         return this.passwordReply(st, payload);
       case "pw_device":
@@ -365,11 +395,24 @@ export class BrowserSession {
   private async passwordChallenge(payload: Uint8Array): Promise<Step> {
     if (payload[0] !== PW_CHALLENGE) throw new WireError("expected PW_CHALLENGE");
     const body = payload.subarray(1);
-    if (body.length !== SALT_BYTES + NONCE_BYTES + SHARE_BYTES) throw new WireError("malformed PW_CHALLENGE");
-    const salt = body.subarray(0, SALT_BYTES);
-    const nonce = body.subarray(SALT_BYTES, SALT_BYTES + NONCE_BYTES);
-    const shareB = body.subarray(SALT_BYTES + NONCE_BYTES);
-    const secret = await deriveSecret(this.options.password ?? "", toBase64(salt));
+    const plain = SALT_BYTES + NONCE_BYTES + SHARE_BYTES;
+    // A device that predates PW_ANNOUNCE ignores the flag and sends no key.
+    if (body.length !== plain && body.length !== plain + STATIC_BYTES) throw new WireError("malformed PW_CHALLENGE");
+    const announced = body.length > plain ? body.slice(plain) : null;
+    this.announced = announced;
+    const challenge: PasswordChallenge = {
+      salt: body.slice(0, SALT_BYTES),
+      nonce: body.slice(SALT_BYTES, SALT_BYTES + NONCE_BYTES),
+      shareB: body.slice(SALT_BYTES + NONCE_BYTES, plain),
+      ...(announced ? { pin: toBase64(announced) } : {}),
+    };
+    if (this.options.password !== undefined) return this.respond(challenge, this.options.password);
+    this.state = { s: "pw_answer", challenge };
+    return { outgoing: [], events: [{ type: "challenged", ...(challenge.pin ? { pin: challenge.pin } : {}) }] };
+  }
+
+  private async respond({ salt, nonce, shareB }: PasswordChallenge, password: string): Promise<Step> {
+    const secret = await deriveSecret(password, toBase64(salt));
     const pake = startPake("A", secret, concatBytes(salt, nonce));
     let psk: Uint8Array;
     try {
@@ -393,7 +436,9 @@ export class BrowserSession {
     const opened = openData(st.channel, payload);
     if (!("control" in opened) || opened.control.t !== "device") throw new WireError("expected the device key");
     const pin = str(opened.control.pub, "pub", 64);
-    if (fromBase64(pin).length !== STATIC_BYTES) throw new WireError("device key has the wrong length");
+    const key = fromBase64(pin);
+    if (key.length !== STATIC_BYTES) throw new WireError("device key has the wrong length");
+    if (this.announced && !equalBytes(key, this.announced)) throw new WireError("the device key differs from the announced one");
     const keys = (await crypto.subtle.generateKey(ECDSA, false, ["sign", "verify"])) as CryptoKeyPair;
     const jwk = publicJwk(await crypto.subtle.exportKey("jwk", keys.publicKey));
     this.state = { s: "pw_registering", channel: st.channel, pin, keys, jwk };

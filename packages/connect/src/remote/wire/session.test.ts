@@ -137,9 +137,103 @@ describe("first connection with the password", () => {
     expect(l.deviceEvents).toEqual([{ type: "auth_failed", via: "password", code: "no_password" }]);
   });
 
-  test("the first connection needs a password", async () => {
+});
+
+describe("first connection, fingerprint before the password", () => {
+  /** Browser without a password: runs until it stops at `challenged`; returns the payloads the device answered. */
+  async function toChallenge(l: Link): Promise<Uint8Array[]> {
+    const [start] = (await l.browser.start()).outgoing;
+    const reply = await l.device.receive(start!);
+    const events: WireEvent[] = [];
+    for (const payload of reply.outgoing) events.push(...(await l.browser.receive(payload)).events);
+    l.browserEvents.push(...events);
+    return reply.outgoing;
+  }
+
+  async function finish(l: Link, password: string): Promise<void> {
+    let toDevice = (await l.browser.answer(password)).outgoing;
+    for (let round = 0; round < 8 && toDevice.length > 0; round++) {
+      const toBrowser: Uint8Array[] = [];
+      for (const payload of toDevice) {
+        const step = await l.device.receive(payload);
+        for (const event of step.events) {
+          l.deviceEvents.push(event);
+          if (event.type === "registered") l.creds = addBrowser(l.creds, event.browser);
+        }
+        toBrowser.push(...step.outgoing);
+      }
+      toDevice = [];
+      for (const payload of toBrowser) {
+        const step = await l.browser.receive(payload);
+        l.browserEvents.push(...step.events);
+        toDevice.push(...step.outgoing);
+      }
+    }
+  }
+
+  test("the device key is shown before any password is used, then the password completes the handshake", async () => {
+    const creds = createDeviceCredentials(verifier);
+    const store = new MemoryStore();
+    const l = link(creds, store, undefined);
+    await toChallenge(l);
+
+    expect(l.browserEvents).toEqual([{ type: "challenged", pin: creds.staticKey.publicKey }]);
+    expect(store.saved).toBeNull();
+    expect(l.deviceEvents).toEqual([]);
+
+    await finish(l, PASSWORD);
+    expect(types(l.browserEvents)).toEqual(["challenged", "pinned", "authenticated"]);
+    expect(store.saved?.pin).toBe(creds.staticKey.publicKey);
+    expect(await roundTrip(l, "browser", { k: "hello", proto: 1 })).toEqual({ k: "hello", proto: 1 });
+  });
+
+  test("a wrong password after the fingerprint fails like before and saves nothing", async () => {
+    const store = new MemoryStore();
+    const l = link(createDeviceCredentials(verifier), store, undefined);
+    await toChallenge(l);
+    await finish(l, "not the password");
+    expect(l.browserEvents.at(-1)).toEqual({ type: "auth_failed", via: "password", code: "bad_password" });
+    expect(store.saved).toBeNull();
+  });
+
+  test("a device that predates the announce flag still works: no key in the challenge, the browser asks for the password first", async () => {
+    const creds = createDeviceCredentials(verifier);
+    const store = new MemoryStore();
+    const l = link(creds, store, undefined);
+    await l.browser.start();
+    const oldStart = await l.device.receive(Uint8Array.of(0x01)); // what a browser without the flag sends
+    expect(oldStart.outgoing[0]).toHaveLength(1 + 16 + 16 + 65);
+    l.browserEvents.push(...(await l.browser.receive(oldStart.outgoing[0]!)).events);
+    expect(l.browserEvents).toEqual([{ type: "challenged" }]);
+
+    await finish(l, PASSWORD);
+    expect(types(l.browserEvents)).toEqual(["challenged", "pinned", "authenticated"]);
+    expect(store.saved?.pin).toBe(creds.staticKey.publicKey);
+  });
+
+  test("a key announced in the challenge that the device then replaces is refused", async () => {
+    const creds = createDeviceCredentials(verifier);
+    const impostor = createDeviceCredentials(verifier);
+    const l = link(creds, new MemoryStore(), undefined);
+    const [start] = (await l.browser.start()).outgoing;
+    const challenge = (await l.device.receive(start!)).outgoing[0]!.slice();
+    challenge.set(fromBase64(impostor.staticKey.publicKey), challenge.length - 32); // someone on the path swaps the announced key
+    l.browserEvents.push(...(await l.browser.receive(challenge)).events);
+    expect(l.browserEvents).toEqual([{ type: "challenged", pin: impostor.staticKey.publicKey }]);
+    await expect(finish(l, PASSWORD)).rejects.toThrow("announced");
+  });
+
+  test("answer needs a challenge", async () => {
     const l = link(createDeviceCredentials(verifier), new MemoryStore(), undefined);
-    await expect(l.browser.start()).rejects.toThrow("password");
+    await expect(l.browser.answer(PASSWORD)).rejects.toThrow("challenge");
+    await l.browser.start();
+    await expect(l.browser.answer(PASSWORD)).rejects.toThrow("challenge");
+  });
+
+  test("a locked device refuses the announce request the same way", async () => {
+    const l = link(createDeviceCredentials(verifier), new MemoryStore(), undefined, { allowed: () => false });
+    await handshake(l);
+    expect(l.browserEvents).toEqual([{ type: "auth_failed", via: "password", code: "locked" }]);
   });
 });
 
