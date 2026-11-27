@@ -1,0 +1,1915 @@
+From d4c2439a21ffb3776d4a1e3c52c43d5b667f8826 Mon Sep 17 00:00:00 2001
+From: cgscli <cgscli@localhost>
+Date: Fri, 27 Nov 2026 10:14:35 +0800
+Subject: [PATCH 13/13] P17: user-facing hints name the cgs command
+
+Reason: A CGS build prints commands the user is meant to copy back into the terminal: `omp --resume <id>` after Ctrl+C, `omp update`, `omp plugin install`, usage lines and help examples, and the tool and prompt text the model reads. The branded binary is installed as `cgs`, so every one of them named a command that does not exist. omp already prints most of them through APP_NAME; the rest are literals.
+Upstream: none (distribution-specific command name)
+Remove-when: CGS stops shipping a branded omp build
+
+- utils/dirs.ts: APP_NAME is "cgs": the help header and usage line, the `--resume` command printed on exit, the update/config/login/setup/plugin/completions messages and the process title
+- the literal hints are rewritten by scripts/brand-commands.ts (in cgscli), not by hand: inline code `omp ...`, `usage: omp ...`, help examples, and `Run/Use/with omp <command>`. The product name in a sentence, `omp://`, `OMP_*`, `.omp` paths, comments and tests stay
+- when this patch conflicts after an omp sync, restore the conflicting files from upstream and run `bun scripts/brand-commands.ts <omp dir>` instead of merging by hand
+---
+ .../ai/src/prompts/perturbation-pool.json.txt | 16 +++++-----
+ .../src/cleanse/prompts/discovery.md          |  2 +-
+ packages/coding-agent/src/cli-commands.ts     | 18 +++++------
+ .../coding-agent/src/cli/auth-broker-cli.ts   |  6 ++--
+ .../coding-agent/src/cli/auth-gateway-cli.ts  |  6 ++--
+ packages/coding-agent/src/cli/bench-cli.ts    |  4 +--
+ .../coding-agent/src/cli/browser-relay-cli.ts |  6 ++--
+ packages/coding-agent/src/cli/collab-cli.ts   |  2 +-
+ .../src/cli/gallery-screenshot.ts             |  2 +-
+ packages/coding-agent/src/cli/git-tui.tsx     |  2 +-
+ .../coding-agent/src/cli/grievances-cli.ts    |  2 +-
+ packages/coding-agent/src/cli/help-extra.ts   |  2 +-
+ packages/coding-agent/src/cli/models-cli.ts   |  2 +-
+ packages/coding-agent/src/cli/plugin-cli.ts   |  2 +-
+ packages/coding-agent/src/cli/predict-cli.tsx |  4 +--
+ packages/coding-agent/src/cli/ps-cli.ts       |  4 +--
+ packages/coding-agent/src/cli/ps-data.ts      |  2 +-
+ packages/coding-agent/src/cli/render-cli.ts   |  2 +-
+ packages/coding-agent/src/cli/skill-cli.ts    | 30 +++++++++----------
+ packages/coding-agent/src/cli/skill-list.ts   |  2 +-
+ packages/coding-agent/src/cli/ssh-cli.ts      |  8 ++---
+ packages/coding-agent/src/cli/ttsr-cli.ts     |  2 +-
+ packages/coding-agent/src/cli/usage-cli.ts    | 16 +++++-----
+ .../coding-agent/src/commands/anonymize.ts    |  6 ++--
+ packages/coding-agent/src/commands/auth.ts    | 12 ++++----
+ .../src/commands/browser-relay.ts             |  4 +--
+ packages/coding-agent/src/commands/cleanse.ts | 14 ++++-----
+ packages/coding-agent/src/commands/clip.ts    |  6 ++--
+ packages/coding-agent/src/commands/collab.ts  |  8 ++---
+ .../coding-agent/src/commands/compress.ts     | 10 +++----
+ packages/coding-agent/src/commands/git.ts     |  4 +--
+ .../coding-agent/src/commands/grievances.ts   | 12 ++++----
+ packages/coding-agent/src/commands/images.ts  | 12 ++++----
+ packages/coding-agent/src/commands/install.ts |  2 +-
+ packages/coding-agent/src/commands/play.ts    |  4 +--
+ packages/coding-agent/src/commands/predict.ts |  4 +--
+ packages/coding-agent/src/commands/ps.ts      | 18 +++++------
+ packages/coding-agent/src/commands/read.ts    | 16 +++++-----
+ packages/coding-agent/src/commands/render.ts  |  8 ++---
+ packages/coding-agent/src/commands/say.ts     |  8 ++---
+ packages/coding-agent/src/commands/session.ts |  8 ++---
+ packages/coding-agent/src/commands/setup.ts   |  2 +-
+ packages/coding-agent/src/commands/skill.ts   | 16 +++++-----
+ packages/coding-agent/src/commands/stream.ts  |  6 ++--
+ packages/coding-agent/src/commands/toks.ts    |  6 ++--
+ packages/coding-agent/src/commands/ttsr.ts    | 22 +++++++-------
+ packages/coding-agent/src/commands/update.ts  |  2 +-
+ packages/coding-agent/src/commands/usage.ts   |  2 +-
+ .../coding-agent/src/commands/worktree.ts     | 16 +++++-----
+ .../coding-agent/src/config/model-resolver.ts |  6 ++--
+ packages/coding-agent/src/daemon/client.ts    |  2 +-
+ .../src/daemon/modules/predict.ts             |  2 +-
+ packages/coding-agent/src/disasm/client.ts    |  6 ++--
+ .../coding-agent/src/discovery/skillshare.ts  |  4 +--
+ .../coding-agent/src/eval/startup-warning.ts  |  2 +-
+ .../src/extensibility/plugins/manager.ts      |  2 +-
+ .../src/extensibility/settings.ts             |  2 +-
+ packages/coding-agent/src/if-bench/index.ts   |  2 +-
+ packages/coding-agent/src/if-bench/runner.ts  |  2 +-
+ packages/coding-agent/src/main.ts             |  2 +-
+ .../src/modes/interactive-mode.ts             |  2 +-
+ .../coding-agent/src/prompts/tools/dsm.md     |  4 +--
+ .../src/prompts/tools/isolation-error.md      |  6 ++--
+ .../src/session/auth-broker-config.ts         |  4 +--
+ packages/coding-agent/src/skillshare/pack.ts  |  2 +-
+ .../slash-commands/builtin-collaboration.ts   |  2 +-
+ packages/coding-agent/src/stream/settings.ts  |  2 +-
+ packages/coding-agent/src/task/ovnfs.ts       |  6 ++--
+ packages/coding-agent/src/task/settings.ts    |  2 +-
+ packages/coding-agent/src/tools/bash.ts       |  2 +-
+ .../src/tools/browser/registry.ts             |  4 +--
+ .../src/tools/browser/relay/bridge.ts         |  2 +-
+ .../src/tools/browser/relay/probe.ts          |  2 +-
+ .../src/tools/browser/settings.ts             |  2 +-
+ .../src/tools/browser/shared-daemon.ts        |  4 +--
+ .../src/ui/overlays/plugins/settings.tsx      | 10 +++----
+ .../src/ui/setup/scenes/updates.tsx           |  2 +-
+ .../src/ui/styles/apps/ps-top/look.ts         |  2 +-
+ packages/coding-agent/src/ui/welcome/tips.txt |  8 ++---
+ packages/collab-web/src/app.tsx               |  2 +-
+ .../src/components/shell/HeaderBar.tsx        |  2 +-
+ packages/metaharness/src/tb/agent.ts          |  2 +-
+ .../src/client/routes/FrustrationRoute.tsx    |  2 +-
+ packages/stats/src/frustration.ts             |  2 +-
+ packages/utils/src/dirs.ts                    |  4 +--
+ 85 files changed, 242 insertions(+), 242 deletions(-)
+
+diff --git a/packages/ai/src/prompts/perturbation-pool.json.txt b/packages/ai/src/prompts/perturbation-pool.json.txt
+index 4ee6e56..4dfff8b 100644
+--- a/packages/ai/src/prompts/perturbation-pool.json.txt
++++ b/packages/ai/src/prompts/perturbation-pool.json.txt
+@@ -28177,12 +28177,12 @@
+ 			]
+ 		},
+ 		{
+-			"source": "Orderly `omp ps stop` saves",
++			"source": "Orderly `cgs ps stop` saves",
+ 			"origin": "packages/coding-agent/src/prompts/tools/dsm.md",
+ 			"variants": [
+-				"An orderly `omp ps stop` saves",
+-				"`omp ps stop` in an orderly way saves",
+-				"A clean `omp ps stop` saves"
++				"An orderly `cgs ps stop` saves",
++				"`cgs ps stop` in an orderly way saves",
++				"A clean `cgs ps stop` saves"
+ 			]
+ 		},
+ 		{
+@@ -29296,12 +29296,12 @@
+ 			]
+ 		},
+ 		{
+-			"source": "`omp worktree clear` reclaims it once this session has exited",
++			"source": "`cgs worktree clear` reclaims it once this session has exited",
+ 			"origin": "packages/coding-agent/src/prompts/tools/isolation-error.md",
+ 			"variants": [
+-				"`omp worktree clear` reclaims it after this session exits",
+-				"Once this session has exited, `omp worktree clear` reclaims it",
+-				"`omp worktree clear` reclaims it when this session has exited"
++				"`cgs worktree clear` reclaims it after this session exits",
++				"Once this session has exited, `cgs worktree clear` reclaims it",
++				"`cgs worktree clear` reclaims it when this session has exited"
+ 			]
+ 		},
+ 		{
+diff --git a/packages/coding-agent/src/cleanse/prompts/discovery.md b/packages/coding-agent/src/cleanse/prompts/discovery.md
+index b3d8f28..8440d77 100644
+--- a/packages/coding-agent/src/cleanse/prompts/discovery.md
++++ b/packages/coding-agent/src/cleanse/prompts/discovery.md
+@@ -6,7 +6,7 @@
+ 
+ # Checker Discovery
+ 
+-User requested `omp cleanse` detect and repair: **{{request}}**
++User requested `cgs cleanse` detect and repair: **{{request}}**
+ 
+ Identify project command(s) surfacing exactly these diagnostics for orchestrator execution, output parsing, and repair-agent dispatch.
+ 
+diff --git a/packages/coding-agent/src/cli-commands.ts b/packages/coding-agent/src/cli-commands.ts
+index 7f7654e..17cb1ce 100644
+--- a/packages/coding-agent/src/cli-commands.ts
++++ b/packages/coding-agent/src/cli-commands.ts
+@@ -333,22 +333,22 @@ export function isSubcommand(first: string | undefined): boolean {
+ // fires vs. when the argv still falls through to `launch`.
+ const RESERVED_TOP_LEVEL_WORDS: Record<string, string> = {
+ 	extensions:
+-		'`omp extensions` is not a management command. Use `omp plugin list` / `omp plugin install`, or run `omp launch extensions` if you meant to send "extensions" as a prompt.',
+-	list: '`omp list` is not a top-level command. Use `omp plugin list` to list installed plugins, or run `omp launch list` if you meant to send "list" as a prompt.',
++		'`cgs extensions` is not a management command. Use `cgs plugin list` / `cgs plugin install`, or run `cgs launch extensions` if you meant to send "extensions" as a prompt.',
++	list: '`cgs list` is not a top-level command. Use `cgs plugin list` to list installed plugins, or run `cgs launch list` if you meant to send "list" as a prompt.',
+ 	remove:
+-		'`omp remove` is not a top-level command. Use `omp plugin uninstall <name>` to remove a plugin, or run `omp launch remove` if you meant to send "remove" as a prompt.',
++		'`cgs remove` is not a top-level command. Use `cgs plugin uninstall <name>` to remove a plugin, or run `cgs launch remove` if you meant to send "remove" as a prompt.',
+ 	uninstall:
+-		'`omp uninstall` is not a top-level command. Use `omp plugin uninstall <name@marketplace>` to remove a plugin, or run `omp launch uninstall` if you meant to send "uninstall" as a prompt.',
++		'`cgs uninstall` is not a top-level command. Use `cgs plugin uninstall <name@marketplace>` to remove a plugin, or run `cgs launch uninstall` if you meant to send "uninstall" as a prompt.',
+ 	marketplace:
+-		'`omp marketplace` is not a top-level command. Use `omp plugin marketplace <add|remove|update|list>` to manage marketplaces, or run `omp launch marketplace` if you meant to send "marketplace" as a prompt.',
++		'`cgs marketplace` is not a top-level command. Use `cgs plugin marketplace <add|remove|update|list>` to manage marketplaces, or run `cgs launch marketplace` if you meant to send "marketplace" as a prompt.',
+ 	discover:
+-		'`omp discover` is not a top-level command. Use `omp plugin discover [marketplace]` to browse available plugins, or run `omp launch discover` if you meant to send "discover" as a prompt.',
++		'`cgs discover` is not a top-level command. Use `cgs plugin discover [marketplace]` to browse available plugins, or run `cgs launch discover` if you meant to send "discover" as a prompt.',
+ 	upgrade:
+-		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
++		'`cgs upgrade` is not a top-level command. Use `cgs plugin upgrade [name]` to upgrade plugins, or run `cgs launch upgrade` if you meant to send "upgrade" as a prompt.',
+ 	enable:
+-		'`omp enable` is not a top-level command. Use `omp plugin enable <name@marketplace>` to enable a plugin, or run `omp launch enable` if you meant to send "enable" as a prompt.',
++		'`cgs enable` is not a top-level command. Use `cgs plugin enable <name@marketplace>` to enable a plugin, or run `cgs launch enable` if you meant to send "enable" as a prompt.',
+ 	disable:
+-		'`omp disable` is not a top-level command. Use `omp plugin disable <name@marketplace>` to disable a plugin, or run `omp launch disable` if you meant to send "disable" as a prompt.',
++		'`cgs disable` is not a top-level command. Use `cgs plugin disable <name@marketplace>` to disable a plugin, or run `cgs launch disable` if you meant to send "disable" as a prompt.',
+ };
+ 
+ // Sub-actions that make `omp marketplace <sub>` unambiguously a management
+diff --git a/packages/coding-agent/src/cli/auth-broker-cli.ts b/packages/coding-agent/src/cli/auth-broker-cli.ts
+index cf7222f..ca408a5 100644
+--- a/packages/coding-agent/src/cli/auth-broker-cli.ts
++++ b/packages/coding-agent/src/cli/auth-broker-cli.ts
+@@ -211,7 +211,7 @@ async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+ 
+ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+ 	if (flags.via && !flags.provider) {
+-		throw new Error("Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)");
++		throw new Error("Usage: cgs auth-broker login <provider> --via=user@host (provider required for remote login)");
+ 	}
+ 	applyUnpausedProviders(await resolveEffectiveSettings());
+ 	const providers = getOAuthProviders();
+@@ -468,7 +468,7 @@ function describeImportEntry(entry: ImportPlanEntry): string {
+ async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+ 	const target = flags.source;
+ 	if (!target) {
+-		throw new Error("Usage: omp auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
++		throw new Error("Usage: cgs auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
+ 	}
+ 	const resolvedTarget = path.resolve(target.startsWith("~") ? target.replace(/^~/, os.homedir()) : target);
+ 	const { entries, skipped } = await loadImportPlan(resolvedTarget, flags.provider, flags.includeDisabled === true);
+@@ -599,7 +599,7 @@ async function runMigrate(flags: AuthBrokerCommandArgs["flags"]): Promise<void>
+ 	}
+ 	if (flags.fromLocal !== true) {
+ 		throw new Error(
+-			"`omp auth-broker migrate` requires an explicit source. Pass `--from-local` to migrate from the local SQLite store and env vars.",
++			"`cgs auth-broker migrate` requires an explicit source. Pass `--from-local` to migrate from the local SQLite store and env vars.",
+ 		);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/cli/auth-gateway-cli.ts b/packages/coding-agent/src/cli/auth-gateway-cli.ts
+index d129a8c..9e25a7b 100644
+--- a/packages/coding-agent/src/cli/auth-gateway-cli.ts
++++ b/packages/coding-agent/src/cli/auth-gateway-cli.ts
+@@ -354,7 +354,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 	const brokerConfig = await resolveAuthBrokerConfig();
+ 	if (!brokerConfig) {
+ 		throw new Error(
+-			"`omp auth-gateway serve` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). The gateway is itself a broker client.",
++			"`cgs auth-gateway serve` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). The gateway is itself a broker client.",
+ 		);
+ 	}
+ 	if (flags.clients !== undefined && flags.noAuth) {
+@@ -608,7 +608,7 @@ async function runStatus(flags: AuthGatewayCommandArgs["flags"]): Promise<void>
+ 			);
+ 			if (!tokenPresent) {
+ 				process.stdout.write(
+-					"Run `omp auth-gateway token` or `omp auth-gateway serve` to create a bearer token.\n",
++					"Run `cgs auth-gateway token` or `cgs auth-gateway serve` to create a bearer token.\n",
+ 				);
+ 			}
+ 		}
+@@ -854,7 +854,7 @@ async function runCheck(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+ 	const brokerConfig = await resolveAuthBrokerConfig();
+ 	if (!brokerConfig) {
+ 		throw new Error(
+-			"`omp auth-gateway check` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). It probes the same credentials the gateway would serve.",
++			"`cgs auth-gateway check` requires OMP_AUTH_BROKER_URL (or `auth.broker.url`/`auth.broker.token` in config.yml). It probes the same credentials the gateway would serve.",
+ 		);
+ 	}
+ 
+diff --git a/packages/coding-agent/src/cli/bench-cli.ts b/packages/coding-agent/src/cli/bench-cli.ts
+index 424559f..878de24 100644
+--- a/packages/coding-agent/src/cli/bench-cli.ts
++++ b/packages/coding-agent/src/cli/bench-cli.ts
+@@ -1136,7 +1136,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
+ 	const now = deps.now ?? (() => performance.now());
+ 	const interactive = deps.stdoutIsTTY ?? process.stdout.isTTY === true;
+ 	if (command.models.length === 0) {
+-		throw new Error("Pass at least one model selector, e.g. `omp bench opus gpt-5.2`");
++		throw new Error("Pass at least one model selector, e.g. `cgs bench opus gpt-5.2`");
+ 	}
+ 	// One row per model, filled as runs finish. Outside cache mode the comparison
+ 	// table doubles as the live footer; cache mode shows a one-line status.
+@@ -1243,7 +1243,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
+ 			if (!preflightKey) {
+ 				const failure: BenchRunFailure = {
+ 					ok: false,
+-					error: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
++					error: `No credentials for provider "${model.provider}". Run \`cgs\` and use /login, or set the provider API key.`,
+ 				};
+ 				results.push(failure);
+ 				if (!json) print(formatRunLine(failure, 0, runs, { tagKind }));
+diff --git a/packages/coding-agent/src/cli/browser-relay-cli.ts b/packages/coding-agent/src/cli/browser-relay-cli.ts
+index ffe368b..78df482 100644
+--- a/packages/coding-agent/src/cli/browser-relay-cli.ts
++++ b/packages/coding-agent/src/cli/browser-relay-cli.ts
+@@ -43,7 +43,7 @@ export async function runBrowserRelayCommand(args: BrowserRelayCommandArgs): Pro
+ async function runSync(): Promise<void> {
+ 	const results = await syncRelayInstalls();
+ 	if (results.length === 0) {
+-		console.log("No omp extension directories registered. Use `omp browser-relay install` to register one.");
++		console.log("No omp extension directories registered. Use `cgs browser-relay install` to register one.");
+ 		return;
+ 	}
+ 	let failed = false;
+@@ -105,7 +105,7 @@ async function runInstall(args: BrowserRelayCommandArgs): Promise<void> {
+ 	}
+ 	if (loaded.length > 0) {
+ 		console.log("");
+-		console.log("Optional: `omp config set browser.relay true` makes the browser tool drive this Chrome by default.");
++		console.log("Optional: `cgs config set browser.relay true` makes the browser tool drive this Chrome by default.");
+ 		return;
+ 	}
+ 	const developerMode = profiles.some(profile => profile.developerMode);
+@@ -117,5 +117,5 @@ async function runInstall(args: BrowserRelayCommandArgs): Promise<void> {
+ 	console.log(
+ 		"From then on omp updates and reloads it by itself. Its toolbar badge shows 'on' while its native host serves the relay.",
+ 	);
+-	console.log("Optional: `omp config set browser.relay true` makes the browser tool drive this Chrome by default.");
++	console.log("Optional: `cgs config set browser.relay true` makes the browser tool drive this Chrome by default.");
+ }
+diff --git a/packages/coding-agent/src/cli/collab-cli.ts b/packages/coding-agent/src/cli/collab-cli.ts
+index 010ee9d..b97c6db 100644
+--- a/packages/coding-agent/src/cli/collab-cli.ts
++++ b/packages/coding-agent/src/cli/collab-cli.ts
+@@ -83,7 +83,7 @@ export async function runCollabListCommand(
+ 		print(`${host.instanceId}  ${session}  ${chalk.dim(cwd)}`);
+ 		print(`  ${chalk.dim(details.join(" · "))}`);
+ 	}
+-	print(chalk.dim("Get a link: omp collab link <instanceId|pid> [--view]"));
++	print(chalk.dim("Get a link: cgs collab link <instanceId|pid> [--view]"));
+ }
+ 
+ export async function runCollabLinkCommand(
+diff --git a/packages/coding-agent/src/cli/gallery-screenshot.ts b/packages/coding-agent/src/cli/gallery-screenshot.ts
+index 8584cc7..f30c3d5 100644
+--- a/packages/coding-agent/src/cli/gallery-screenshot.ts
++++ b/packages/coding-agent/src/cli/gallery-screenshot.ts
+@@ -63,7 +63,7 @@ export async function captureGalleryScreenshots(
+ 	const vhs = $which("vhs");
+ 	if (!vhs) {
+ 		throw new Error(
+-			"`omp gallery --screenshot` requires VHS, which is not installed. " +
++			"`cgs gallery --screenshot` requires VHS, which is not installed. " +
+ 				"Install it (e.g. `brew install vhs`, or see https://github.com/charmbracelet/vhs) and retry.",
+ 		);
+ 	}
+diff --git a/packages/coding-agent/src/cli/git-tui.tsx b/packages/coding-agent/src/cli/git-tui.tsx
+index a8eb34f..5ac6a44 100644
+--- a/packages/coding-agent/src/cli/git-tui.tsx
++++ b/packages/coding-agent/src/cli/git-tui.tsx
+@@ -93,5 +93,5 @@ export async function showGitOverlay(shell: FullscreenShell, options: GitTuiOpti
+ /** Run standalone repository review (`omp git`) until the user quits. */
+ export async function runGitTui(options: GitTuiOptions = {}): Promise<void> {
+ 	const host = await createHost(options);
+-	await withStandaloneShell({ title: "omp git" }, shell => presentGitApp(shell, host));
++	await withStandaloneShell({ title: "cgs git" }, shell => presentGitApp(shell, host));
+ }
+diff --git a/packages/coding-agent/src/cli/grievances-cli.ts b/packages/coding-agent/src/cli/grievances-cli.ts
+index 1e6af4f..5365674 100644
+--- a/packages/coding-agent/src/cli/grievances-cli.ts
++++ b/packages/coding-agent/src/cli/grievances-cli.ts
+@@ -255,7 +255,7 @@ export async function pushGrievances(options: PushGrievancesOptions): Promise<vo
+ 		if (rejected > 0) {
+ 			console.log(
+ 				chalk.yellow(
+-					`${rejected} grievance${rejected === 1 ? " was" : "s were"} refused by the server and marked rejected (see \`omp grievances list\`).`,
++					`${rejected} grievance${rejected === 1 ? " was" : "s were"} refused by the server and marked rejected (see \`cgs grievances list\`).`,
+ 				),
+ 			);
+ 		}
+diff --git a/packages/coding-agent/src/cli/help-extra.ts b/packages/coding-agent/src/cli/help-extra.ts
+index 0b2e530..3ca10ba 100644
+--- a/packages/coding-agent/src/cli/help-extra.ts
++++ b/packages/coding-agent/src/cli/help-extra.ts
+@@ -83,7 +83,7 @@ export function getExtraHelpText(): string {
+ 
+   ${chalk.dim("# Configuration")}
+   OMP_PROFILE                 - Named profile for isolated agent state (same as --profile)
+-  Use \`omp --profile <name> --alias <command>\` to create a shell shortcut for a profile
++  Use \`cgs --profile <name> --alias <command>\` to create a shell shortcut for a profile
+   PI_CODING_AGENT_DIR        - Session storage directory (default: ~/${CONFIG_DIR_NAME}/agent)
+   PI_PACKAGE_DIR             - Override package directory (for Nix/Guix store paths)
+   PI_SMOL_MODEL              - Override smol/fast model (see --smol)
+diff --git a/packages/coding-agent/src/cli/models-cli.ts b/packages/coding-agent/src/cli/models-cli.ts
+index c5a1a6e..d8a700b 100644
+--- a/packages/coding-agent/src/cli/models-cli.ts
++++ b/packages/coding-agent/src/cli/models-cli.ts
+@@ -394,7 +394,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
+ 	const kind = command.flags.kind ?? "chat";
+ 
+ 	if (action === "find" && (!pattern || pattern.trim().length === 0)) {
+-		process.stderr.write("`omp models find` requires a search substring, e.g. `omp models find minimax`\n");
++		process.stderr.write("`cgs models find` requires a search substring, e.g. `cgs models find minimax`\n");
+ 		process.exitCode = 1;
+ 		return;
+ 	}
+diff --git a/packages/coding-agent/src/cli/plugin-cli.ts b/packages/coding-agent/src/cli/plugin-cli.ts
+index 63d1643..6f4f16e 100644
+--- a/packages/coding-agent/src/cli/plugin-cli.ts
++++ b/packages/coding-agent/src/cli/plugin-cli.ts
+@@ -346,7 +346,7 @@ async function handleUpgrade(
+ 			if (flags.scope) {
+ 				console.error(
+ 					chalk.yellow(
+-						`Warning: --scope is ignored when upgrading all plugins. Use 'omp plugin upgrade <id> --scope ${flags.scope}' to target a specific plugin and scope.`,
++						`Warning: --scope is ignored when upgrading all plugins. Use 'cgs plugin upgrade <id> --scope ${flags.scope}' to target a specific plugin and scope.`,
+ 					),
+ 				);
+ 			}
+diff --git a/packages/coding-agent/src/cli/predict-cli.tsx b/packages/coding-agent/src/cli/predict-cli.tsx
+index 8d69db9..332f275 100644
+--- a/packages/coding-agent/src/cli/predict-cli.tsx
++++ b/packages/coding-agent/src/cli/predict-cli.tsx
+@@ -205,7 +205,7 @@ function PredictPage(props: {
+ 	const head = (
+ 		<row key="head" role="omp.app.head" justify="between" align="center">
+ 			<row role="omp.app.where" gap="sm" align="center">
+-				<text text="omp predict" role="omp.app.title" />
++				<text text="cgs predict" role="omp.app.title" />
+ 				<text
+ 					spans={[{ s: "muted", t: `${page.lanes.length} engines · comparison typing never teaches them` }]}
+ 					truncate="end"
+@@ -277,7 +277,7 @@ function PredictPage(props: {
+ /** Run the fullscreen engine comparison until the user quits. */
+ export async function runPredictCompare(): Promise<void> {
+ 	try {
+-		await runStandalone({ title: "omp predict" }, screen => {
++		await runStandalone({ title: "cgs predict" }, screen => {
+ 			const page = new PredictCompare();
+ 			let input: UiNode | undefined;
+ 			return {
+diff --git a/packages/coding-agent/src/cli/ps-cli.ts b/packages/coding-agent/src/cli/ps-cli.ts
+index 594fa75..6090c9f 100644
+--- a/packages/coding-agent/src/cli/ps-cli.ts
++++ b/packages/coding-agent/src/cli/ps-cli.ts
+@@ -160,7 +160,7 @@ function createPsTopHost(): PsTopHost {
+ 
+ /** The interactive monitor (`omp ps` on a TTY) until the user quits. */
+ function runPsTop(flags: PsCommandArgs["flags"], host: PsTopHost): Promise<void> {
+-	return runStandalone({ title: "omp ps" }, screen => {
++	return runStandalone({ title: "cgs ps" }, screen => {
+ 		const done = Promise.withResolvers<void>();
+ 		const model = new PsTopModel(host, {
+ 			all: flags.all,
+@@ -184,7 +184,7 @@ export async function runPsCommand(cmd: PsCommandArgs): Promise<void> {
+ 			return;
+ 		}
+ 		if (!cmd.name) {
+-			console.error(chalk.red(`${cmd.action} requires a unit name or id. Run \`omp ps\` to list units.`));
++			console.error(chalk.red(`${cmd.action} requires a unit name or id. Run \`cgs ps\` to list units.`));
+ 			process.exitCode = 1;
+ 			return;
+ 		}
+diff --git a/packages/coding-agent/src/cli/ps-data.ts b/packages/coding-agent/src/cli/ps-data.ts
+index 52a395f..031025f 100644
+--- a/packages/coding-agent/src/cli/ps-data.ts
++++ b/packages/coding-agent/src/cli/ps-data.ts
+@@ -82,7 +82,7 @@ export async function resolveUnit(client: DaemonClient, name: string, target: Ps
+ 	if (byId) return byId;
+ 	const matches = units.filter(unit => unit.key === name || unitName(unit) === name);
+ 	if (matches.length === 1) return matches[0];
+-	if (matches.length === 0) throw new Error(`No unit named ${name}. Run \`omp ps --all\` to list units.`);
++	if (matches.length === 0) throw new Error(`No unit named ${name}. Run \`cgs ps --all\` to list units.`);
+ 	const projectDir = await targetProjectDir(target);
+ 	const preferred = matches.filter(unit => inView(unit, false, projectDir));
+ 	if (preferred.length === 1) return preferred[0];
+diff --git a/packages/coding-agent/src/cli/render-cli.ts b/packages/coding-agent/src/cli/render-cli.ts
+index 139c6f8..84bbb1a 100644
+--- a/packages/coding-agent/src/cli/render-cli.ts
++++ b/packages/coding-agent/src/cli/render-cli.ts
+@@ -191,7 +191,7 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
+ 			await mode?.shell.stop();
+ 			await session?.dispose();
+ 		} catch (err) {
+-			logger.debug("omp render teardown failed", { error: String(err) });
++			logger.debug("cgs render teardown failed", { error: String(err) });
+ 		}
+ 		tempDir.removeSync();
+ 	}
+diff --git a/packages/coding-agent/src/cli/skill-cli.ts b/packages/coding-agent/src/cli/skill-cli.ts
+index b9459d0..3dc3b29 100644
+--- a/packages/coding-agent/src/cli/skill-cli.ts
++++ b/packages/coding-agent/src/cli/skill-cli.ts
+@@ -75,7 +75,7 @@ export interface SkillCommandArgs {
+ 	};
+ }
+ 
+-export const SKILL_USAGE = `Usage: omp skill <action> [...]
++export const SKILL_USAGE = `Usage: cgs skill <action> [...]
+ 
+ Install and discover:
+   install [@scope/name[@range]...] [-g] [--yes]   Install skills (no specs: install from skills.json)
+@@ -275,7 +275,7 @@ async function handlePublish(cmd: SkillCommandArgs): Promise<number> {
+ 			});
+ 		} catch (error) {
+ 			if (error instanceof SkillshareError && error.status === 409) {
+-				throw new Error(`${error.message} (versions are immutable; bump with \`omp skill version patch\`)`);
++				throw new Error(`${error.message} (versions are immutable; bump with \`cgs skill version patch\`)`);
+ 			}
+ 			throw error;
+ 		}
+@@ -292,7 +292,7 @@ async function handlePublish(cmd: SkillCommandArgs): Promise<number> {
+ 
+ async function handleVersion(cmd: SkillCommandArgs): Promise<number> {
+ 	const kind = cmd.args[0];
+-	if (!kind) throw new CliUsageError("usage: omp skill version <patch|minor|major|x.y.z> [dir]");
++	if (!kind) throw new CliUsageError("usage: cgs skill version <patch|minor|major|x.y.z> [dir]");
+ 	const version = await bumpVersion(path.resolve(cmd.cwd, cmd.args[1] ?? "."), kind);
+ 	process.stdout.write(`v${version}\n`);
+ 	return 0;
+@@ -300,7 +300,7 @@ async function handleVersion(cmd: SkillCommandArgs): Promise<number> {
+ 
+ async function handleTag(cmd: SkillCommandArgs): Promise<number> {
+ 	if (cmd.args[0] === "rm" || cmd.args[0] === "remove") {
+-		const usage = "usage: omp skill tag rm <@scope/name> <tag>";
++		const usage = "usage: cgs skill tag rm <@scope/name> <tag>";
+ 		const spec = specOrThrow(cmd.args[1], usage);
+ 		const tag = cmd.args[2];
+ 		if (!tag) throw new CliUsageError(usage);
+@@ -309,7 +309,7 @@ async function handleTag(cmd: SkillCommandArgs): Promise<number> {
+ 		process.stdout.write(`- ${tag}: @${spec.scope}/${spec.name}\n`);
+ 		return 0;
+ 	}
+-	const usage = "usage: omp skill tag <@scope/name@version> <tag>";
++	const usage = "usage: cgs skill tag <@scope/name@version> <tag>";
+ 	const spec = specOrThrow(cmd.args[0], usage);
+ 	const version = exactVersionOrThrow(spec, usage);
+ 	const tag = cmd.args[1];
+@@ -323,7 +323,7 @@ async function handleTag(cmd: SkillCommandArgs): Promise<number> {
+ }
+ 
+ async function handleYank(cmd: SkillCommandArgs): Promise<number> {
+-	const usage = "usage: omp skill yank <@scope/name@version> [--undo]";
++	const usage = "usage: cgs skill yank <@scope/name@version> [--undo]";
+ 	const spec = specOrThrow(cmd.args[0], usage);
+ 	const version = exactVersionOrThrow(spec, usage);
+ 	const yanked = !cmd.flags.undo;
+@@ -333,7 +333,7 @@ async function handleYank(cmd: SkillCommandArgs): Promise<number> {
+ }
+ 
+ async function handleDeprecate(cmd: SkillCommandArgs): Promise<number> {
+-	const usage = "usage: omp skill deprecate <@scope/name[@range]> <message|--undo>";
++	const usage = "usage: cgs skill deprecate <@scope/name[@range]> <message|--undo>";
+ 	const spec = specOrThrow(cmd.args[0], usage);
+ 	const text = cmd.args.slice(1).join(" ").trim();
+ 	if (cmd.flags.undo && text) throw new CliUsageError(`pass a message or --undo, not both; ${usage}`);
+@@ -369,7 +369,7 @@ async function handleDeprecate(cmd: SkillCommandArgs): Promise<number> {
+ }
+ 
+ async function handleOwner(cmd: SkillCommandArgs): Promise<number> {
+-	const usage = "usage: omp skill owner add|rm <@scope/name> <username>";
++	const usage = "usage: cgs skill owner add|rm <@scope/name> <username>";
+ 	const op = cmd.args[0];
+ 	if (op !== "add" && op !== "rm" && op !== "remove") throw new CliUsageError(usage);
+ 	const spec = specOrThrow(cmd.args[1], usage);
+@@ -390,7 +390,7 @@ async function handleOwner(cmd: SkillCommandArgs): Promise<number> {
+ async function handleToken(cmd: SkillCommandArgs): Promise<number> {
+ 	const op = cmd.args[0];
+ 	if (op === "create") {
+-		const usage = "usage: omp skill token create <name> [--package @scope/name]... [--expires days]";
++		const usage = "usage: cgs skill token create <name> [--package @scope/name]... [--expires days]";
+ 		const name = cmd.args.slice(1).join(" ").trim();
+ 		if (!name) throw new CliUsageError(usage);
+ 		const packages = (cmd.flags.package ?? []).map(raw => {
+@@ -438,17 +438,17 @@ async function handleToken(cmd: SkillCommandArgs): Promise<number> {
+ 	}
+ 	if (op === "revoke" || op === "rm") {
+ 		const id = cmd.args[1];
+-		if (!id) throw new CliUsageError("usage: omp skill token revoke <id>");
++		if (!id) throw new CliUsageError("usage: cgs skill token revoke <id>");
+ 		await withClient(cmd.flags, false, client => client.revokeToken(id));
+ 		process.stdout.write(`revoked ${id}\n`);
+ 		return 0;
+ 	}
+-	throw new CliUsageError("usage: omp skill token create|ls|revoke");
++	throw new CliUsageError("usage: cgs skill token create|ls|revoke");
+ }
+ 
+ async function handleImport(cmd: SkillCommandArgs): Promise<number> {
+ 	const file = cmd.args[0];
+-	if (!file) throw new CliUsageError("usage: omp skill import <file.skill>");
++	if (!file) throw new CliUsageError("usage: cgs skill import <file.skill>");
+ 	const resolved = path.resolve(cmd.cwd, file);
+ 	let zip: Uint8Array;
+ 	try {
+@@ -492,18 +492,18 @@ async function dispatch(cmd: SkillCommandArgs): Promise<number> {
+ 		case "update":
+ 			return updateSkills({ names: args, global: flags.global === true, yes: flags.yes === true, cwd });
+ 		case "uninstall":
+-			if (args.length === 0) throw new CliUsageError("usage: omp skill uninstall <name...> [-g]");
++			if (args.length === 0) throw new CliUsageError("usage: cgs skill uninstall <name...> [-g]");
+ 			return uninstallSkills({ names: args, global: flags.global === true, cwd });
+ 		case "search": {
+ 			const query = args.join(" ").trim();
+-			if (!query) throw new CliUsageError("usage: omp skill search <query>");
++			if (!query) throw new CliUsageError("usage: cgs skill search <query>");
+ 			return searchSkills({ query, sort: flags.sort ?? "relevance", json: flags.json === true });
+ 		}
+ 		case "list":
+ 			return handleSkillList(args, cwd, flags.json === true);
+ 		case "info": {
+ 			const spec = args[0];
+-			if (!spec) throw new CliUsageError("usage: omp skill info <@scope/name[@version]>");
++			if (!spec) throw new CliUsageError("usage: cgs skill info <@scope/name[@version]>");
+ 			return showSkillInfo({ spec, json: flags.json === true });
+ 		}
+ 	}
+diff --git a/packages/coding-agent/src/cli/skill-list.ts b/packages/coding-agent/src/cli/skill-list.ts
+index 749f81f..fa726f0 100644
+--- a/packages/coding-agent/src/cli/skill-list.ts
++++ b/packages/coding-agent/src/cli/skill-list.ts
+@@ -103,7 +103,7 @@ function toTerminalSafe(value: string): string {
+  * including discovery warnings.
+  */
+ export async function handleSkillList(args: string[], cwd: string, json: boolean): Promise<number> {
+-	if (args.length > 1) throw new CliUsageError("usage: omp skill list [dir] [--json]");
++	if (args.length > 1) throw new CliUsageError("usage: cgs skill list [dir] [--json]");
+ 	const target = args[0] ? path.resolve(cwd, args[0]) : cwd;
+ 	let isDirectory = false;
+ 	try {
+diff --git a/packages/coding-agent/src/cli/ssh-cli.ts b/packages/coding-agent/src/cli/ssh-cli.ts
+index 39e2e9a..cd9d8eb 100644
+--- a/packages/coding-agent/src/cli/ssh-cli.ts
++++ b/packages/coding-agent/src/cli/ssh-cli.ts
+@@ -60,7 +60,7 @@ async function handleAdd(cmd: SSHCommandArgs): Promise<void> {
+ 	if (!name) {
+ 		process.stdout.write(chalk.red("Error: Host name required\n"));
+ 		process.stdout.write(
+-			chalk.dim("Usage: omp ssh add <name> --host <address> [--user <user>] [--port <port>] [--key <path>]\n"),
++			chalk.dim("Usage: cgs ssh add <name> --host <address> [--user <user>] [--port <port>] [--key <path>]\n"),
+ 		);
+ 		process.exitCode = 1;
+ 		return;
+@@ -69,7 +69,7 @@ async function handleAdd(cmd: SSHCommandArgs): Promise<void> {
+ 	const host = cmd.flags.host;
+ 	if (!host) {
+ 		process.stdout.write(chalk.red("Error: --host is required\n"));
+-		process.stdout.write(chalk.dim("Usage: omp ssh add <name> --host <address>\n"));
++		process.stdout.write(chalk.dim("Usage: cgs ssh add <name> --host <address>\n"));
+ 		process.exitCode = 1;
+ 		return;
+ 	}
+@@ -107,7 +107,7 @@ async function handleRemove(cmd: SSHCommandArgs): Promise<void> {
+ 	const name = cmd.args[0];
+ 	if (!name) {
+ 		process.stdout.write(chalk.red("Error: Host name required\n"));
+-		process.stdout.write(chalk.dim("Usage: omp ssh remove <name> [--scope project|user]\n"));
++		process.stdout.write(chalk.dim("Usage: cgs ssh remove <name> [--scope project|user]\n"));
+ 		process.exitCode = 1;
+ 		return;
+ 	}
+@@ -144,7 +144,7 @@ async function handleList(cmd: SSHCommandArgs): Promise<void> {
+ 
+ 	if (!hasProject && !hasUser) {
+ 		process.stdout.write(chalk.dim("No SSH hosts configured\n"));
+-		process.stdout.write(chalk.dim("Add one with: omp ssh add <name> --host <address>\n"));
++		process.stdout.write(chalk.dim("Add one with: cgs ssh add <name> --host <address>\n"));
+ 		return;
+ 	}
+ 
+diff --git a/packages/coding-agent/src/cli/ttsr-cli.ts b/packages/coding-agent/src/cli/ttsr-cli.ts
+index 3c58079..e811b4c 100644
+--- a/packages/coding-agent/src/cli/ttsr-cli.ts
++++ b/packages/coding-agent/src/cli/ttsr-cli.ts
+@@ -413,7 +413,7 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
+ 	if (rules.length === 0) {
+ 		const msg = args.rule
+ 			? "Rule registered but produced no TTSR entry."
+-			: `No TTSR rules registered for this project as agent "${agent}". Rules scoped to other agents via \`agents\` are excluded — run \`omp ttsr list\` to see every rule, or pass --agent <name>.`;
++			: `No TTSR rules registered for this project as agent "${agent}". Rules scoped to other agents via \`agents\` are excluded — run \`cgs ttsr list\` to see every rule, or pass --agent <name>.`;
+ 		if (json) {
+ 			process.stdout.write(`${JSON.stringify({ error: msg })}\n`);
+ 		} else {
+diff --git a/packages/coding-agent/src/cli/usage-cli.ts b/packages/coding-agent/src/cli/usage-cli.ts
+index b309097..ad3decf 100644
+--- a/packages/coding-agent/src/cli/usage-cli.ts
++++ b/packages/coding-agent/src/cli/usage-cli.ts
+@@ -1246,7 +1246,7 @@ function formatNoProviderCredentials(provider: string, storedAccounts: UsageAcco
+ 	const hint =
+ 		stored.length > 0
+ 			? `Providers with stored credentials: ${stored.join(", ")}.`
+-			: "Run `omp` and use /login to add accounts.";
++			: "Run `cgs` and use /login to add accounts.";
+ 	return `No credentials stored for provider "${provider}". ${hint}\n`;
+ }
+ 
+@@ -1420,7 +1420,7 @@ function formatOAuthIdentityKeys(rows: readonly OAuthIdentityKeyRow[]): string {
+ 	return lines.join("\n");
+ }
+ 
+-const RESET_COMMAND = "omp usage reset";
++const RESET_COMMAND = "cgs usage reset";
+ 
+ function failUsageReset(message: string): void {
+ 	process.stderr.write(chalk.red(`${message}\n`));
+@@ -1557,7 +1557,7 @@ async function runUsageResetCommand(
+ 		}
+ 		if (accounts.length === 0) {
+ 			const names = providers.map(formatResetProviderName).join(" or ");
+-			process.stderr.write(chalk.yellow(`No ${names} accounts found. Run \`omp\` and use /login to add one.\n`));
++			process.stderr.write(chalk.yellow(`No ${names} accounts found. Run \`cgs\` and use /login to add one.\n`));
+ 			process.exitCode = 1;
+ 			return;
+ 		}
+@@ -1577,7 +1577,7 @@ async function runUsageResetCommand(
+ 	const lockKey = resetAccountLockKey(target);
+ 	if (!lockKey) {
+ 		failUsageReset(
+-			`${who}: this login stores no account id or email to fence the spend against other omp processes, so nothing was spent. Run \`omp\` and use /login to sign in to it again.`,
++			`${who}: this login stores no account id or email to fence the spend against other omp processes, so nothing was spent. Run \`cgs\` and use /login to sign in to it again.`,
+ 		);
+ 		return;
+ 	}
+@@ -1612,7 +1612,7 @@ async function runUsageResetCommand(
+ 		const ago = formatDuration(Date.now() - result.atMs);
+ 		failUsageReset(
+ 			result.state === "reset"
+-				? `${who}: another omp process spent a saved reset on this account ${ago} ago, so this one was not spent. Check \`omp usage\` before spending another.`
++				? `${who}: another omp process spent a saved reset on this account ${ago} ago, so this one was not spent. Check \`cgs usage\` before spending another.`
+ 				: `${who}: another omp process started spending a saved reset on this account ${ago} ago, so nothing was spent. Try again in a minute.`,
+ 		);
+ 		return;
+@@ -1657,7 +1657,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			if (cmd.redact) {
+ 				process.stderr.write(
+ 					chalk.red(
+-						"`omp usage accounts` prints identity keys verbatim for configuration; --redact does not apply.\n",
++						"`cgs usage accounts` prints identity keys verbatim for configuration; --redact does not apply.\n",
+ 					),
+ 				);
+ 				process.exitCode = 1;
+@@ -1679,7 +1679,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			if (rows.length === 0) {
+ 				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+ 				process.stderr.write(
+-					chalk.yellow(`No OAuth accounts found${scope}. Run \`omp\` and use /login to add accounts.\n`),
++					chalk.yellow(`No OAuth accounts found${scope}. Run \`cgs\` and use /login to add accounts.\n`),
+ 				);
+ 				process.exitCode = 1;
+ 				return;
+@@ -1851,7 +1851,7 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
+ 			} else if (storedAccounts.length > 0) {
+ 				message = "No usage data. Stored credentials are for providers without a usage endpoint.\n";
+ 			} else {
+-				message = "No credentials found. Run `omp` and use /login to add accounts.\n";
++				message = "No credentials found. Run `cgs` and use /login to add accounts.\n";
+ 			}
+ 			process.stderr.write(chalk.yellow(message));
+ 			process.exitCode = 1;
+diff --git a/packages/coding-agent/src/commands/anonymize.ts b/packages/coding-agent/src/commands/anonymize.ts
+index da5aa73..f47181f 100644
+--- a/packages/coding-agent/src/commands/anonymize.ts
++++ b/packages/coding-agent/src/commands/anonymize.ts
+@@ -16,9 +16,9 @@ export default class Anonymize extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp anonymize",
+-		"omp anonymize 01a0285c -o ./bug-report",
+-		"omp anonymize ~/.omp/agent/sessions/--work-pi--/session.jsonl",
++		"cgs anonymize",
++		"cgs anonymize 01a0285c -o ./bug-report",
++		"cgs anonymize ~/.omp/agent/sessions/--work-pi--/session.jsonl",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/auth.ts b/packages/coding-agent/src/commands/auth.ts
+index d606e55..8e99ee4 100644
+--- a/packages/coding-agent/src/commands/auth.ts
++++ b/packages/coding-agent/src/commands/auth.ts
+@@ -104,7 +104,7 @@ export function parseAuthExport(text: string, source = "credential file"): AuthE
+ 	} catch {
+ 		throw new AuthTransferError(`${source} is not valid JSON.`);
+ 	}
+-	if (!isRecord(value)) throw new AuthTransferError(`${source} is not an \`omp auth export\` document.`);
++	if (!isRecord(value)) throw new AuthTransferError(`${source} is not an \`cgs auth export\` document.`);
+ 	if (value.version !== AUTH_EXPORT_VERSION) {
+ 		throw new AuthTransferError(
+ 			`${source} has export version ${JSON.stringify(value.version)}; this omp reads version ${AUTH_EXPORT_VERSION}.`,
+@@ -174,7 +174,7 @@ export default class Auth extends Command {
+ 			options: ["export", "import"],
+ 		}),
+ 		file: Args.string({
+-			description: "File written by `omp auth export`, or - for stdin (import)",
++			description: "File written by `cgs auth export`, or - for stdin (import)",
+ 			required: false,
+ 		}),
+ 	};
+@@ -189,20 +189,20 @@ export default class Auth extends Command {
+ 		const { args, argv } = await this.parse(Auth);
+ 		const action = args.action;
+ 		if (action === "export" && argv.length > 1) {
+-			throw new CliUsageError(`Unexpected argument "${argv[1]}". Usage: omp auth export`);
++			throw new CliUsageError(`Unexpected argument "${argv[1]}". Usage: cgs auth export`);
+ 		}
+ 		if (action === "import" && !args.file) {
+-			throw new CliUsageError("Missing credential file. Usage: omp auth import <file|->");
++			throw new CliUsageError("Missing credential file. Usage: cgs auth import <file|->");
+ 		}
+ 		if (action === "import" && argv.length > 2) {
+-			throw new CliUsageError(`Unexpected argument "${argv[2]}". Usage: omp auth import <file|->`);
++			throw new CliUsageError(`Unexpected argument "${argv[2]}". Usage: cgs auth import <file|->`);
+ 		}
+ 
+ 		const broker = await resolveAuthBrokerConfig();
+ 		if (broker) {
+ 			process.stderr.write(
+ 				`${chalk.red(`error: omp uses the auth broker at ${broker.url}; credentials live there, not in this machine's agent.db.`)}\n` +
+-					"Run this on the broker host, or disable the broker (`omp config reset auth.broker.url`) first.\n",
++					"Run this on the broker host, or disable the broker (`cgs config reset auth.broker.url`) first.\n",
+ 			);
+ 			process.exitCode = 1;
+ 			return;
+diff --git a/packages/coding-agent/src/commands/browser-relay.ts b/packages/coding-agent/src/commands/browser-relay.ts
+index 77b24f6..9e90bf9 100644
+--- a/packages/coding-agent/src/commands/browser-relay.ts
++++ b/packages/coding-agent/src/commands/browser-relay.ts
+@@ -31,8 +31,8 @@ export default class BrowserRelay extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp browser-relay install    # install the omp extension, register it in Chrome and add its native host",
+-		"omp browser-relay sync       # sync every registered extension directory",
++		"cgs browser-relay install    # install the omp extension, register it in Chrome and add its native host",
++		"cgs browser-relay sync       # sync every registered extension directory",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/cleanse.ts b/packages/coding-agent/src/commands/cleanse.ts
+index 205c19d..2e4e75d 100644
+--- a/packages/coding-agent/src/commands/cleanse.ts
++++ b/packages/coding-agent/src/commands/cleanse.ts
+@@ -36,13 +36,13 @@ export default class Cleanse extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp cleanse",
+-		"omp cleanse --all",
+-		'omp cleanse "ts errors"',
+-		"omp cleanse -n 8",
+-		"omp cleanse -m opus",
+-		"omp cleanse -t",
+-		"omp cleanse --agents 12 --model anthropic/claude-opus-4-6",
++		"cgs cleanse",
++		"cgs cleanse --all",
++		'cgs cleanse "ts errors"',
++		"cgs cleanse -n 8",
++		"cgs cleanse -m opus",
++		"cgs cleanse -t",
++		"cgs cleanse --agents 12 --model anthropic/claude-opus-4-6",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/clip.ts b/packages/coding-agent/src/commands/clip.ts
+index b258f4e..9ea64d2 100644
+--- a/packages/coding-agent/src/commands/clip.ts
++++ b/packages/coding-agent/src/commands/clip.ts
+@@ -24,9 +24,9 @@ export default class Clip extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp clip",
+-		'omp clip -t "Streaming the lexer" -d "Rewrote the tokenizer live"',
+-		"omp clip /tmp/omp-recordings/2026-09-22T10-00-00-1a2b3c4d.ompcast",
++		"cgs clip",
++		'cgs clip -t "Streaming the lexer" -d "Rewrote the tokenizer live"',
++		"cgs clip /tmp/omp-recordings/2026-09-22T10-00-00-1a2b3c4d.ompcast",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/collab.ts b/packages/coding-agent/src/commands/collab.ts
+index 948434b..1a89e22 100644
+--- a/packages/coding-agent/src/commands/collab.ts
++++ b/packages/coding-agent/src/commands/collab.ts
+@@ -27,10 +27,10 @@ export default class Collab extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp collab list",
+-		"omp collab list --json",
+-		"omp collab link <instanceId|pid>",
+-		"omp collab link <pid> --view",
++		"cgs collab list",
++		"cgs collab list --json",
++		"cgs collab link <instanceId|pid>",
++		"cgs collab link <pid> --view",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/compress.ts b/packages/coding-agent/src/commands/compress.ts
+index 21fc90f..c8ee3d7 100644
+--- a/packages/coding-agent/src/commands/compress.ts
++++ b/packages/coding-agent/src/commands/compress.ts
+@@ -18,11 +18,11 @@ export default class Compress extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp compress prompts/tools/read.md",
+-		"omp compress notes.md -o notes.compressed.md",
+-		"omp compress 'src/prompts/**/*.md' -i",
+-		"omp compress a.md b.md c.md -i -n 8",
+-		"omp compress spec.md -r 5 -m opus",
++		"cgs compress prompts/tools/read.md",
++		"cgs compress notes.md -o notes.compressed.md",
++		"cgs compress 'src/prompts/**/*.md' -i",
++		"cgs compress a.md b.md c.md -i -n 8",
++		"cgs compress spec.md -r 5 -m opus",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/git.ts b/packages/coding-agent/src/commands/git.ts
+index 24807bd..a3e28d9 100644
+--- a/packages/coding-agent/src/commands/git.ts
++++ b/packages/coding-agent/src/commands/git.ts
+@@ -26,12 +26,12 @@ export default class Git extends Command {
+ 		dir: Flags.string({ char: "C", description: "Run in another directory instead of the current one" }),
+ 	};
+ 
+-	static examples = ["omp git", "omp git HEAD~2", "omp git -C ~/projects/app"];
++	static examples = ["cgs git", "cgs git HEAD~2", "cgs git -C ~/projects/app"];
+ 
+ 	async run(): Promise<void> {
+ 		const { args, flags } = await this.parse(Git);
+ 		if (process.stdout.isTTY !== true || process.stdin.isTTY !== true) {
+-			console.error("omp git is interactive and requires a TTY");
++			console.error("cgs git is interactive and requires a TTY");
+ 			process.exit(1);
+ 		}
+ 		// Load settings first so the user's configured theme/symbol preset apply
+diff --git a/packages/coding-agent/src/commands/grievances.ts b/packages/coding-agent/src/commands/grievances.ts
+index fd0c945..29f982c 100644
+--- a/packages/coding-agent/src/commands/grievances.ts
++++ b/packages/coding-agent/src/commands/grievances.ts
+@@ -29,12 +29,12 @@ export default class Grievances extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp grievances",
+-		"omp grievances list --tool find",
+-		"omp grievances clean --id 209",
+-		"omp grievances clean --tool find",
+-		"omp grievances clean --all",
+-		"omp grievances push",
++		"cgs grievances",
++		"cgs grievances list --tool find",
++		"cgs grievances clean --id 209",
++		"cgs grievances clean --tool find",
++		"cgs grievances clean --all",
++		"cgs grievances push",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/images.ts b/packages/coding-agent/src/commands/images.ts
+index d69b517..78d70aa 100644
+--- a/packages/coding-agent/src/commands/images.ts
++++ b/packages/coding-agent/src/commands/images.ts
+@@ -22,12 +22,12 @@ export default class Images extends Command {
+ 		timeout: Flags.integer({ description: "External health probe timeout in seconds" }),
+ 	};
+ 	static examples = [
+-		"omp images",
+-		"omp images status --json",
+-		"omp images doctor",
+-		"omp images probe --timeout 15",
+-		"omp images purge",
+-		"omp images purge --all --apply",
++		"cgs images",
++		"cgs images status --json",
++		"cgs images doctor",
++		"cgs images probe --timeout 15",
++		"cgs images purge",
++		"cgs images purge --all --apply",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/install.ts b/packages/coding-agent/src/commands/install.ts
+index bb635e1..216069a 100644
+--- a/packages/coding-agent/src/commands/install.ts
++++ b/packages/coding-agent/src/commands/install.ts
+@@ -66,7 +66,7 @@ export default class Install extends Command {
+ 		const targets = Array.isArray(args.targets) ? args.targets : args.targets ? [args.targets] : [];
+ 
+ 		if (targets.length === 0) {
+-			process.stderr.write("Usage: omp install <path | npm-spec | name@marketplace> [...]\n");
++			process.stderr.write("Usage: cgs install <path | npm-spec | name@marketplace> [...]\n");
+ 			process.exit(1);
+ 		}
+ 
+diff --git a/packages/coding-agent/src/commands/play.ts b/packages/coding-agent/src/commands/play.ts
+index f9ac078..ce7bab1 100644
+--- a/packages/coding-agent/src/commands/play.ts
++++ b/packages/coding-agent/src/commands/play.ts
+@@ -17,13 +17,13 @@ export default class Play extends Command {
+ 		"idle-limit": Flags.string({ char: "i", description: "Cap pauses between frames to this many seconds" }),
+ 	};
+ 
+-	static examples = ["omp play", "omp play /tmp/omp-recordings/2026-09-22T10-00-00-1a2b3c4d.ompcast -s 2 -i 1"];
++	static examples = ["cgs play", "cgs play /tmp/omp-recordings/2026-09-22T10-00-00-1a2b3c4d.ompcast -s 2 -i 1"];
+ 
+ 	async run(): Promise<void> {
+ 		const { args, flags } = await this.parse(Play);
+ 		const speed = parsePositive("--speed", flags.speed) ?? 1;
+ 		const idleLimit = parsePositive("--idle-limit", flags["idle-limit"]);
+-		if (!process.stdout.isTTY) throw new CliUsageError("omp play needs an interactive terminal");
++		if (!process.stdout.isTTY) throw new CliUsageError("cgs play needs an interactive terminal");
+ 
+ 		const file = args.file ? path.resolve(args.file) : await latestRecording();
+ 		if (!file) throw new CliUsageError(`no recordings in ${recordingsDir()}; start one with /record`);
+diff --git a/packages/coding-agent/src/commands/predict.ts b/packages/coding-agent/src/commands/predict.ts
+index 4bfb45b..0de9998 100644
+--- a/packages/coding-agent/src/commands/predict.ts
++++ b/packages/coding-agent/src/commands/predict.ts
+@@ -5,12 +5,12 @@ import { runPredictCompare } from "../cli/predict-cli";
+ export default class Predict extends Command {
+ 	static description = commandHelp.description;
+ 
+-	static examples = ["omp predict"];
++	static examples = ["cgs predict"];
+ 
+ 	async run(): Promise<void> {
+ 		await this.parse(Predict);
+ 		if (!process.stdin.isTTY || !process.stdout.isTTY)
+-			throw new CliUsageError("omp predict needs an interactive terminal");
++			throw new CliUsageError("cgs predict needs an interactive terminal");
+ 		await runPredictCompare();
+ 	}
+ }
+diff --git a/packages/coding-agent/src/commands/ps.ts b/packages/coding-agent/src/commands/ps.ts
+index a78ae1e..6957e04 100644
+--- a/packages/coding-agent/src/commands/ps.ts
++++ b/packages/coding-agent/src/commands/ps.ts
+@@ -41,15 +41,15 @@ export default class Ps extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp ps",
+-		"omp ps --all",
+-		"omp ps logs web --follow",
+-		"omp ps stop web",
+-		"omp ps kill web",
+-		"omp ps send web 'rs\\n'",
+-		"omp ps send web --signal SIGINT",
+-		"omp ps mode web persist",
+-		"omp ps info web",
++		"cgs ps",
++		"cgs ps --all",
++		"cgs ps logs web --follow",
++		"cgs ps stop web",
++		"cgs ps kill web",
++		"cgs ps send web 'rs\\n'",
++		"cgs ps send web --signal SIGINT",
++		"cgs ps mode web persist",
++		"cgs ps info web",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/read.ts b/packages/coding-agent/src/commands/read.ts
+index deffed9..9cb1dd9 100644
+--- a/packages/coding-agent/src/commands/read.ts
++++ b/packages/coding-agent/src/commands/read.ts
+@@ -18,14 +18,14 @@ export default class Read extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp read src/foo.ts",
+-		"omp read src/foo.ts:50-100",
+-		"omp read src/foo.ts:raw",
+-		"omp read https://example.com",
+-		"omp read omp://",
+-		"omp read issue://123",
+-		"omp read path/to/archive.zip:dir/file.ts",
+-		"omp read path/to/db.sqlite:users:42",
++		"cgs read src/foo.ts",
++		"cgs read src/foo.ts:50-100",
++		"cgs read src/foo.ts:raw",
++		"cgs read https://example.com",
++		"cgs read omp://",
++		"cgs read issue://123",
++		"cgs read path/to/archive.zip:dir/file.ts",
++		"cgs read path/to/db.sqlite:users:42",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/render.ts b/packages/coding-agent/src/commands/render.ts
+index 63b9451..6763587 100644
+--- a/packages/coding-agent/src/commands/render.ts
++++ b/packages/coding-agent/src/commands/render.ts
+@@ -25,10 +25,10 @@ export default class Render extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp render",
+-		"omp render 01a0285c --plain",
+-		"omp render ~/.omp/agent/sessions/--work-pi--/big.jsonl -q -t --repaint 5",
+-		"omp render -w 200 > thread.ansi",
++		"cgs render",
++		"cgs render 01a0285c --plain",
++		"cgs render ~/.omp/agent/sessions/--work-pi--/big.jsonl -q -t --repaint 5",
++		"cgs render -w 200 > thread.ansi",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/say.ts b/packages/coding-agent/src/commands/say.ts
+index 7b36093..54abb03 100644
+--- a/packages/coding-agent/src/commands/say.ts
++++ b/packages/coding-agent/src/commands/say.ts
+@@ -39,9 +39,9 @@ export default class Say extends Command {
+ 	};
+ 
+ 	static examples = [
+-		'omp say "hello world"',
+-		"omp say --file notes.md --voice edwin --speed 1.2",
+-		'omp say "hello world" --out /tmp/hello.wav',
++		'cgs say "hello world"',
++		"cgs say --file notes.md --voice edwin --speed 1.2",
++		'cgs say "hello world" --out /tmp/hello.wav',
+ 	];
+ 
+ 	async run(): Promise<void> {
+@@ -159,7 +159,7 @@ export default class Say extends Command {
+ 	#synthesisFailed(model: string): void {
+ 		process.stderr.write(
+ 			chalk.red(
+-				`error: could not synthesize with local TTS model "${model}". Run \`omp setup speech\` to install it.\n`,
++				`error: could not synthesize with local TTS model "${model}". Run \`cgs setup speech\` to install it.\n`,
+ 			),
+ 		);
+ 	}
+diff --git a/packages/coding-agent/src/commands/session.ts b/packages/coding-agent/src/commands/session.ts
+index 345efd8..0ad1a1d 100644
+--- a/packages/coding-agent/src/commands/session.ts
++++ b/packages/coding-agent/src/commands/session.ts
+@@ -27,10 +27,10 @@ const ACTIONS = ["pack", "unpack", "moved", "lease"] as const;
+ type SessionAction = (typeof ACTIONS)[number];
+ 
+ const USAGE: Record<SessionAction, string> = {
+-	pack: "omp session pack <session> <out.tar>",
+-	unpack: "omp session unpack <archive.tar> --cwd <dir>",
+-	moved: "omp session moved <session> --to <label>",
+-	lease: "omp session lease [--json] -- <session-id>...",
++	pack: "cgs session pack <session> <out.tar>",
++	unpack: "cgs session unpack <archive.tar> --cwd <dir>",
++	moved: "cgs session moved <session> --to <label>",
++	lease: "cgs session lease [--json] -- <session-id>...",
+ };
+ 
+ const UNPACK_NOTE: Record<UnpackMode, string> = {
+diff --git a/packages/coding-agent/src/commands/setup.ts b/packages/coding-agent/src/commands/setup.ts
+index aca5cfd..46d277d 100644
+--- a/packages/coding-agent/src/commands/setup.ts
++++ b/packages/coding-agent/src/commands/setup.ts
+@@ -23,7 +23,7 @@ export async function runOnboardingSetup(deps: OnboardingSetupDependencies = {})
+ 	const stdinIsTTY = deps.stdinIsTTY ?? process.stdin.isTTY;
+ 	const stdoutIsTTY = deps.stdoutIsTTY ?? process.stdout.isTTY;
+ 	if (!stdinIsTTY || !stdoutIsTTY) {
+-		(deps.writeStderr ?? (text => process.stderr.write(text)))("omp setup requires an interactive TTY.\n");
++		(deps.writeStderr ?? (text => process.stderr.write(text)))("cgs setup requires an interactive TTY.\n");
+ 		(deps.exit ?? process.exit)(1);
+ 		return;
+ 	}
+diff --git a/packages/coding-agent/src/commands/skill.ts b/packages/coding-agent/src/commands/skill.ts
+index 59cf451..13a06b6 100644
+--- a/packages/coding-agent/src/commands/skill.ts
++++ b/packages/coding-agent/src/commands/skill.ts
+@@ -35,14 +35,14 @@ export default class Skill extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp skill install @alice/pdf-tools",
+-		"omp skill install -g @alice/pdf-tools@^1.2",
+-		'omp skill search "pdf" --sort downloads',
+-		"omp skill version minor && omp skill publish",
+-		"omp skill publish ./skills/pdf-tools --dry-run",
+-		"omp skill tag @alice/pdf-tools@2.0.0-beta.1 next",
+-		'omp skill deprecate @alice/pdf-tools@"<1.0.0" "use 1.x"',
+-		"omp skill token create ci --package @alice/pdf-tools --expires 90",
++		"cgs skill install @alice/pdf-tools",
++		"cgs skill install -g @alice/pdf-tools@^1.2",
++		'cgs skill search "pdf" --sort downloads',
++		"cgs skill version minor && cgs skill publish",
++		"cgs skill publish ./skills/pdf-tools --dry-run",
++		"cgs skill tag @alice/pdf-tools@2.0.0-beta.1 next",
++		'cgs skill deprecate @alice/pdf-tools@"<1.0.0" "use 1.x"',
++		"cgs skill token create ci --package @alice/pdf-tools --expires 90",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/stream.ts b/packages/coding-agent/src/commands/stream.ts
+index dd39230..0ef17f3 100644
+--- a/packages/coding-agent/src/commands/stream.ts
++++ b/packages/coding-agent/src/commands/stream.ts
+@@ -18,9 +18,9 @@ export default class Stream extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp stream",
+-		'omp stream --title "Building a parser"',
+-		"omp stream --server https://live.example.com",
++		"cgs stream",
++		'cgs stream --title "Building a parser"',
++		"cgs stream --server https://live.example.com",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/toks.ts b/packages/coding-agent/src/commands/toks.ts
+index a02f2fc..271727f 100644
+--- a/packages/coding-agent/src/commands/toks.ts
++++ b/packages/coding-agent/src/commands/toks.ts
+@@ -71,9 +71,9 @@ export default class Toks extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp toks README.md",
+-		'omp toks "The quick brown fox jumps over the lazy dog"',
+-		"omp toks src/main.ts --json",
++		"cgs toks README.md",
++		'cgs toks "The quick brown fox jumps over the lazy dog"',
++		"cgs toks src/main.ts --json",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/ttsr.ts b/packages/coding-agent/src/commands/ttsr.ts
+index b204b4c..dc3a97b 100644
+--- a/packages/coding-agent/src/commands/ttsr.ts
++++ b/packages/coding-agent/src/commands/ttsr.ts
+@@ -62,18 +62,18 @@ export default class Ttsr extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp ttsr list",
+-		"omp ttsr test 'const x: any = 1'",
+-		"omp ttsr test src/foo.ts",
+-		"omp ttsr test --file src/foo.ts",
+-		"omp ttsr test --file src/foo.ts --source text",
+-		"omp ttsr test --rule .omp/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'",
+-		"omp ttsr test --agent scout 'const x: any = 1'",
++		"cgs ttsr list",
++		"cgs ttsr test 'const x: any = 1'",
++		"cgs ttsr test src/foo.ts",
++		"cgs ttsr test --file src/foo.ts",
++		"cgs ttsr test --file src/foo.ts --source text",
++		"cgs ttsr test --rule .omp/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'",
++		"cgs ttsr test --agent scout 'const x: any = 1'",
+ 		"echo 'Box::leak(&mut v)' | omp ttsr test --file - --path src/lib.rs",
+-		"omp ttsr test --source tool --tool edit --path src/foo.ts 'const x: any = 1'",
+-		"omp ttsr scan",
+-		"omp ttsr scan src/",
+-		"omp ttsr scan -r .omp/rules/no-any.md src/",
++		"cgs ttsr test --source tool --tool edit --path src/foo.ts 'const x: any = 1'",
++		"cgs ttsr scan",
++		"cgs ttsr scan src/",
++		"cgs ttsr scan -r .omp/rules/no-any.md src/",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/commands/update.ts b/packages/coding-agent/src/commands/update.ts
+index 043fc87..75f1b74 100644
+--- a/packages/coding-agent/src/commands/update.ts
++++ b/packages/coding-agent/src/commands/update.ts
+@@ -20,7 +20,7 @@ export default class Update extends Command {
+ 		stable: Flags.boolean({ description: "Switch back to the stable channel", default: false }),
+ 	};
+ 
+-	static examples = ["omp update", "omp update --check", "omp update --canary"];
++	static examples = ["cgs update", "cgs update --check", "cgs update --canary"];
+ 
+ 	async run(): Promise<void> {
+ 		const { flags } = await this.parse(Update);
+diff --git a/packages/coding-agent/src/commands/usage.ts b/packages/coding-agent/src/commands/usage.ts
+index 4ce0366..e81e446 100644
+--- a/packages/coding-agent/src/commands/usage.ts
++++ b/packages/coding-agent/src/commands/usage.ts
+@@ -15,7 +15,7 @@ export default class Usage extends Command {
+ 			options: ["invalidate", "clients", "accounts", "reset"],
+ 		}),
+ 		target: Args.string({
+-			description: "Saved reset to spend with `reset`: <provider>/<credential id> as `omp usage reset` lists it",
++			description: "Saved reset to spend with `reset`: <provider>/<credential id> as `cgs usage reset` lists it",
+ 			required: false,
+ 		}),
+ 	};
+diff --git a/packages/coding-agent/src/commands/worktree.ts b/packages/coding-agent/src/commands/worktree.ts
+index 72c4f06..bf8a4c8 100644
+--- a/packages/coding-agent/src/commands/worktree.ts
++++ b/packages/coding-agent/src/commands/worktree.ts
+@@ -68,14 +68,14 @@ export default class Worktree extends Command {
+ 	};
+ 
+ 	static examples = [
+-		"omp worktree",
+-		"omp worktree list --json",
+-		"omp worktree add ../feature",
+-		"omp worktree add -b feature ../feature origin/main",
+-		"omp worktree add --detach ../review HEAD~2",
+-		"omp worktree clear",
+-		"omp worktree clear --dry-run",
+-		"omp worktree clear --all",
++		"cgs worktree",
++		"cgs worktree list --json",
++		"cgs worktree add ../feature",
++		"cgs worktree add -b feature ../feature origin/main",
++		"cgs worktree add --detach ../review HEAD~2",
++		"cgs worktree clear",
++		"cgs worktree clear --dry-run",
++		"cgs worktree clear --all",
+ 	];
+ 
+ 	async run(): Promise<void> {
+diff --git a/packages/coding-agent/src/config/model-resolver.ts b/packages/coding-agent/src/config/model-resolver.ts
+index 30f2e04..2b892f1 100644
+--- a/packages/coding-agent/src/config/model-resolver.ts
++++ b/packages/coding-agent/src/config/model-resolver.ts
+@@ -2668,7 +2668,7 @@ function resolveCliModelInScope(
+ 			model: undefined,
+ 			selector: undefined,
+ 			warning: undefined,
+-			error: `Unknown provider "${cliProvider}". Run "omp models" to see available providers/models.`,
++			error: `Unknown provider "${cliProvider}". Run "cgs models" to see available providers/models.`,
+ 		};
+ 	}
+ 
+@@ -2757,7 +2757,7 @@ function resolveCliModelInScope(
+ 					selector: undefined,
+ 					thinkingLevel: undefined,
+ 					warning: resolved.warning,
+-					error: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
++					error: `Model "${trimmedModel}" not found. Run "cgs models" to see available models.`,
+ 				};
+ 			}
+ 		}
+@@ -2818,7 +2818,7 @@ function resolveCliModelInScope(
+ 			selector: undefined,
+ 			thinkingLevel: undefined,
+ 			warning,
+-			error: `Model "${display}" not found.${hint} Run "omp models" to see available models.`,
++			error: `Model "${display}" not found.${hint} Run "cgs models" to see available models.`,
+ 		};
+ 	}
+ 
+diff --git a/packages/coding-agent/src/daemon/client.ts b/packages/coding-agent/src/daemon/client.ts
+index 5acf100..de09e4d 100644
+--- a/packages/coding-agent/src/daemon/client.ts
++++ b/packages/coding-agent/src/daemon/client.ts
+@@ -216,7 +216,7 @@ function unreachableError(lastError: Error | undefined): Error {
+ 	return new Error(
+ 		`The omp daemon did not answer at ${where} within ${START_TIMEOUT_MS / 1000}s: ` +
+ 			`${lastError?.message ?? "endpoint unavailable"}. Runtime dir: ${daemonDir()}. ` +
+-			"Run `omp --smoke-test` to verify daemon startup, or `omp ps` to inspect it.",
++			"Run `cgs --smoke-test` to verify daemon startup, or `cgs ps` to inspect it.",
+ 	);
+ }
+ 
+diff --git a/packages/coding-agent/src/daemon/modules/predict.ts b/packages/coding-agent/src/daemon/modules/predict.ts
+index 686df35..23aabd9 100644
+--- a/packages/coding-agent/src/daemon/modules/predict.ts
++++ b/packages/coding-agent/src/daemon/modules/predict.ts
+@@ -112,7 +112,7 @@ async function readCursor(stateDir: string): Promise<number | undefined> {
+ class SmolLmWeightsMissingError extends Error {
+ 	constructor() {
+ 		super(
+-			"SmolLM weights are not downloaded yet (the editor fetches them on first use, or run `omp tiny-models download smollm`)",
++			"SmolLM weights are not downloaded yet (the editor fetches them on first use, or run `cgs tiny-models download smollm`)",
+ 		);
+ 	}
+ }
+diff --git a/packages/coding-agent/src/disasm/client.ts b/packages/coding-agent/src/disasm/client.ts
+index 6483fb8..270979e 100644
+--- a/packages/coding-agent/src/disasm/client.ts
++++ b/packages/coding-agent/src/disasm/client.ts
+@@ -117,7 +117,7 @@ class HostConnection {
+ 	}
+ 
+ 	#goneError(): HostGoneError {
+-		return new HostGoneError(`${unitLabel(this.#key)} ${this.#key} closed; see \`omp ps logs ${this.#unitId}\``);
++		return new HostGoneError(`${unitLabel(this.#key)} ${this.#key} closed; see \`cgs ps logs ${this.#unitId}\``);
+ 	}
+ 
+ 	#onLine(line: string): void {
+@@ -348,7 +348,7 @@ async function openDatabase(
+ 		const db = await attachOpen();
+ 		if (db) return db;
+ 	}
+-	throw new ToolError(`${unitLabel(key)} ${key} exited right after starting; see \`omp ps\``);
++	throw new ToolError(`${unitLabel(key)} ${key} exited right after starting; see \`cgs ps\``);
+ }
+ 
+ /** Options for {@link acquireDatabase}. */
+@@ -402,7 +402,7 @@ export async function acquireDatabase(
+ 		const unit = await openingUnit(key);
+ 		const age = unit ? ` for ${Math.round((Date.now() - unit.startedAt) / 60_000)}m` : "";
+ 		const where = unit ? ` in unit \`${unit.id}\`` : "";
+-		const stop = unit ? `, or stop it with \`omp ps stop ${unit.id}\`` : "";
++		const stop = unit ? `, or stop it with \`cgs ps stop ${unit.id}\`` : "";
+ 		throw new ToolError(
+ 			`${label} is still analyzing ${databaseRef(loc)} (opening${age}); the analysis continues${where}. Retry later${stop}`,
+ 		);
+diff --git a/packages/coding-agent/src/discovery/skillshare.ts b/packages/coding-agent/src/discovery/skillshare.ts
+index 4055e1c..631b972 100644
+--- a/packages/coding-agent/src/discovery/skillshare.ts
++++ b/packages/coding-agent/src/discovery/skillshare.ts
+@@ -39,7 +39,7 @@ async function loadLockedSkill(
+ 	const storeDir = getSkillStorePath(scope, name, entry.version);
+ 	// Only a completed unpack of the locked bytes counts; anything else is restored by `omp skill update`.
+ 	if ((await readStoredIntegrity(storeDir)) !== entry.integrity) {
+-		logger.debug("Skillshare skill missing from store; run `omp skill update` to restore it", {
++		logger.debug("Skillshare skill missing from store; run `cgs skill update` to restore it", {
+ 			id,
+ 			version: entry.version,
+ 			storeDir,
+@@ -104,7 +104,7 @@ export async function loadSkillshareSkills(ctx: LoadContext): Promise<LoadResult
+ registerProvider<Skill>(skillCapability.id, {
+ 	id: SKILLSHARE_PROVIDER_ID,
+ 	displayName: "Skillshare",
+-	description: "Registry skills installed with `omp skill install` (skills.lock.json)",
++	description: "Registry skills installed with `cgs skill install` (skills.lock.json)",
+ 	priority: PRIORITY,
+ 	load: loadSkillshareSkills,
+ });
+diff --git a/packages/coding-agent/src/eval/startup-warning.ts b/packages/coding-agent/src/eval/startup-warning.ts
+index d70191e..d4a0af4 100644
+--- a/packages/coding-agent/src/eval/startup-warning.ts
++++ b/packages/coding-agent/src/eval/startup-warning.ts
+@@ -4,7 +4,7 @@ import type { Settings } from "../config/settings";
+ import { checkPythonKernelAvailability } from "./py/kernel";
+ import { cfgEvalJs, cfgEvalPy, cfgPythonInterpreter } from "./settings";
+ 
+-const PYTHON_FIX_HINT = "Install Python 3.8+ or set python.interpreter, then verify with `omp setup python --check`.";
++const PYTHON_FIX_HINT = "Install Python 3.8+ or set python.interpreter, then verify with `cgs setup python --check`.";
+ 
+ /**
+  * Warning for an enabled Python eval backend with no working interpreter.
+diff --git a/packages/coding-agent/src/extensibility/plugins/manager.ts b/packages/coding-agent/src/extensibility/plugins/manager.ts
+index d895a44..c704880 100644
+--- a/packages/coding-agent/src/extensibility/plugins/manager.ts
++++ b/packages/coding-agent/src/extensibility/plugins/manager.ts
+@@ -1153,7 +1153,7 @@ export class PluginManager {
+ 					status: fixed ? "ok" : "error",
+ 					message: fixed
+ 						? `Reconciled version drift: node_modules now matches lock v${recordedVersion}`
+-						: `Version drift: lock records v${recordedVersion} but node_modules has v${pluginPkg.version} (run \`omp plugin install ${name} --force\`)`,
++						: `Version drift: lock records v${recordedVersion} but node_modules has v${pluginPkg.version} (run \`cgs plugin install ${name} --force\`)`,
+ 					fixed,
+ 				});
+ 				if (fixed) {
+diff --git a/packages/coding-agent/src/extensibility/settings.ts b/packages/coding-agent/src/extensibility/settings.ts
+index 599c803..f81835a 100644
+--- a/packages/coding-agent/src/extensibility/settings.ts
++++ b/packages/coding-agent/src/extensibility/settings.ts
+@@ -21,7 +21,7 @@ export const cfgSkillsRegistryUrl = register({
+ 		group: "Skills",
+ 		label: "Skill Registry",
+ 		description:
+-			"Skillshare registry used by `omp skill` to install, search, and publish skills (https://host[:port])",
++			"Skillshare registry used by `cgs skill` to install, search, and publish skills (https://host[:port])",
+ 	},
+ });
+ 
+diff --git a/packages/coding-agent/src/if-bench/index.ts b/packages/coding-agent/src/if-bench/index.ts
+index d9af962..79898a8 100644
+--- a/packages/coding-agent/src/if-bench/index.ts
++++ b/packages/coding-agent/src/if-bench/index.ts
+@@ -64,7 +64,7 @@ export async function runIfBenchCommand(
+ 	deps: IfBenchDependencies = {},
+ ): Promise<IfBenchSummary> {
+ 	if (command.models.length === 0) {
+-		throw new Error("Pass at least one model selector, e.g. `omp if-bench opus gpt-5.2`");
++		throw new Error("Pass at least one model selector, e.g. `cgs if-bench opus gpt-5.2`");
+ 	}
+ 	const maxTurns = positiveInteger("turns", command.flags.turns, DEFAULT_TURNS);
+ 	const arrayLength = positiveInteger("length", command.flags.length, DEFAULT_ARRAY_LENGTH);
+diff --git a/packages/coding-agent/src/if-bench/runner.ts b/packages/coding-agent/src/if-bench/runner.ts
+index 46677de..4cbdd32 100644
+--- a/packages/coding-agent/src/if-bench/runner.ts
++++ b/packages/coding-agent/src/if-bench/runner.ts
+@@ -180,7 +180,7 @@ async function runTarget(target: BenchTarget, options: IfBenchRunOptions): Promi
+ 		report.failure = {
+ 			turn: 0,
+ 			kind: "provider",
+-			detail: `No credentials for provider "${model.provider}". Run \`omp\` and use /login, or set the provider API key.`,
++			detail: `No credentials for provider "${model.provider}". Run \`cgs\` and use /login, or set the provider API key.`,
+ 		};
+ 		options.observer?.modelFinished?.(report);
+ 		return report;
+diff --git a/packages/coding-agent/src/main.ts b/packages/coding-agent/src/main.ts
+index a461de0..98bc457 100644
+--- a/packages/coding-agent/src/main.ts
++++ b/packages/coding-agent/src/main.ts
+@@ -1361,7 +1361,7 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
+ 	parsed.messages.splice(messageIndex, 1);
+ }
+ const SESSION_NOT_FOUND_HINT =
+-	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
++	"Run `cgs --resume` without an argument to pick from recent sessions, or `cgs` to start a new one.";
+ 
+ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
+ 	if (!parsed.noSession) return;
+diff --git a/packages/coding-agent/src/modes/interactive-mode.ts b/packages/coding-agent/src/modes/interactive-mode.ts
+index 344726c..23feea7 100644
+--- a/packages/coding-agent/src/modes/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive-mode.ts
+@@ -8103,7 +8103,7 @@ export class InteractiveMode implements InteractiveModeContext {
+ 			await active.stop();
+ 			this.statusLine.setModes({ recording: false });
+ 			this.showStatus(
+-				`Saved ${formatDuration(elapsed)} recording to ${active.path} · replay: omp play · share: omp clip`,
++				`Saved ${formatDuration(elapsed)} recording to ${active.path} · replay: cgs play · share: cgs clip`,
+ 			);
+ 			return;
+ 		}
+diff --git a/packages/coding-agent/src/prompts/tools/dsm.md b/packages/coding-agent/src/prompts/tools/dsm.md
+index 38caac5..208d931 100644
+--- a/packages/coding-agent/src/prompts/tools/dsm.md
++++ b/packages/coding-agent/src/prompts/tools/dsm.md
+@@ -13,7 +13,7 @@ The `dsm` object exists in JavaScript and Python Eval; it is not a standalone to
+ - Every `open` or `get` owns one independent reference. `close()` releases only that reference; the final release closes the database. Child close/disposal cannot close another owner's live reference.
+ - `db.handle()` returns a printable reference bound to this live database incarnation. Pass that exact string in a child's task/context; the child MUST `await dsm.open(handle)` and close its returned handle in `finally`. Keep the parent's reference until the children finish.
+ - Portable handles work from any project on the same machine, even when a child's cwd/worktree differs. The selected backend must match; an expired handle never creates or reopens a database.
+-- Databases appear in `omp ps` labelled `<Backend label> <ref>` (`IDA …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
++- Databases appear in `cgs ps` labelled `<Backend label> <ref>` (`IDA …`, `Ghidra …`, `Binary Ninja …`); unit ids are UUIDs. Owner references are saved/released on session disposal or conversation/backend change; resumable children retain theirs until explicit close or disposal.
+ - Handles expose `id`, `backend`, `ref`, `path`, and `info`. Closed references require another `dsm.open(path or handle)` or `dsm.get(id)`.
+ 
+ JavaScript:
+@@ -71,5 +71,5 @@ await db.close(save=True)
+ - Binary Ninja exec code MUST wait with `wait_analysis()`; NEVER call `bv.update_analysis_and_wait()` (cannot be interrupted) or `bv.abort_analysis()` (permanently degrades the open database).
+ - Dirty databases autosave after ~10 s idle; `save()` forces it. `close()` requests saving by default; the final release honors any owner's save request. Unsaved changes are discarded only if every released reference chose `save: false`.
+ - An `exec` counts as a possible edit: a saving close after one can rewrite the database file even when the code only read. Close with `save: false` after read-only work on a file that must stay byte-identical.
+-- Orderly `omp ps stop` saves; a crash, forced kill, or unresponsive timeout loses changes since the last save.
++- Orderly `cgs ps stop` saves; a crash, forced kill, or unresponsive timeout loses changes since the last save.
+ </critical>
+diff --git a/packages/coding-agent/src/prompts/tools/isolation-error.md b/packages/coding-agent/src/prompts/tools/isolation-error.md
+index 2e9ecf8..aab238e 100644
+--- a/packages/coding-agent/src/prompts/tools/isolation-error.md
++++ b/packages/coding-agent/src/prompts/tools/isolation-error.md
+@@ -4,7 +4,7 @@ Merge failed: {{message}}{{#if captureError}}; patch capture failed: {{captureEr
+ The agent's commits are preserved on branch {{rescueBranch}} — merge or cherry-pick it manually.
+ {{/if}}
+ {{#if retainedDir}}
+-Isolation workspace retained at {{retainedDir}} — recover the changes from it; `omp worktree clear` reclaims it once this session has exited.
++Isolation workspace retained at {{retainedDir}} — recover the changes from it; `cgs worktree clear` reclaims it once this session has exited.
+ {{#if sidecarMissing}}
+ Its mount metadata is missing, so unmount {{retainedDir}} manually before clearing.
+ {{/if}}
+@@ -12,14 +12,14 @@ Its mount metadata is missing, so unmount {{retainedDir}} manually before cleari
+ {{/when}}
+ {{#when kind "==" "patch-capture-failed"}}
+ Patch capture failed: {{message}}.
+-Isolation workspace retained at {{retainedDir}} — recover the changes from it; `omp worktree clear` reclaims it once this session has exited.
++Isolation workspace retained at {{retainedDir}} — recover the changes from it; `cgs worktree clear` reclaims it once this session has exited.
+ {{#if sidecarMissing}}
+ Its mount metadata is missing, so unmount {{retainedDir}} manually before clearing.
+ {{/if}}
+ {{/when}}
+ {{#when kind "==" "nested-capture-failed"}}
+ Nested patch capture failed: {{message}}.
+-Isolation workspace retained at {{retainedDir}} — recover the changes from it; `omp worktree clear` reclaims it once this session has exited.
++Isolation workspace retained at {{retainedDir}} — recover the changes from it; `cgs worktree clear` reclaims it once this session has exited.
+ {{#if sidecarMissing}}
+ Its mount metadata is missing, so unmount {{retainedDir}} manually before clearing.
+ {{/if}}
+diff --git a/packages/coding-agent/src/session/auth-broker-config.ts b/packages/coding-agent/src/session/auth-broker-config.ts
+index e26223d..a67a181 100644
+--- a/packages/coding-agent/src/session/auth-broker-config.ts
++++ b/packages/coding-agent/src/session/auth-broker-config.ts
+@@ -363,8 +363,8 @@ export async function describeAuthBrokerStartupError(error: unknown): Promise<st
+ 	return (
+ 		`Auth broker${target} is unreachable (${error.message}). ` +
+ 		"omp is configured to use this broker for credentials and will not fall back to local credentials automatically.\n" +
+-		"Start the broker with `omp auth-broker serve`, or disable it with " +
+-		"`omp config reset auth.broker.url` and `omp config reset auth.broker.token` " +
++		"Start the broker with `cgs auth-broker serve`, or disable it with " +
++		"`cgs config reset auth.broker.url` and `cgs config reset auth.broker.token` " +
+ 		"(or unset OMP_AUTH_BROKER_URL / OMP_AUTH_BROKER_TOKEN)."
+ 	);
+ }
+diff --git a/packages/coding-agent/src/skillshare/pack.ts b/packages/coding-agent/src/skillshare/pack.ts
+index e89fb75..caf78e0 100644
+--- a/packages/coding-agent/src/skillshare/pack.ts
++++ b/packages/coding-agent/src/skillshare/pack.ts
+@@ -103,7 +103,7 @@ function validateRegistryFrontmatter(frontmatter: Record<string, unknown>): Regi
+ 	const version = metadata.version;
+ 	if (version === undefined) {
+ 		throw new Error(
+-			`${SKILL_FILE}: "metadata.version" is required to publish (set it with \`omp skill version patch\`)`,
++			`${SKILL_FILE}: "metadata.version" is required to publish (set it with \`cgs skill version patch\`)`,
+ 		);
+ 	}
+ 	if (!SEMVER_RE.test(version)) {
+diff --git a/packages/coding-agent/src/slash-commands/builtin-collaboration.ts b/packages/coding-agent/src/slash-commands/builtin-collaboration.ts
+index bc94fa8..bbf480b 100644
+--- a/packages/coding-agent/src/slash-commands/builtin-collaboration.ts
++++ b/packages/coding-agent/src/slash-commands/builtin-collaboration.ts
+@@ -334,7 +334,7 @@ export const LIVE_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+ 		inlineHint: "[start|view|list|stop|status] [relayUrl]",
+ 		subcommands: [
+ 			{ name: "view", description: "Share a read-only link (guests can watch, not prompt)" },
+-			{ name: "list", description: "List active local Collab hosts (no links; use `omp collab link`)" },
++			{ name: "list", description: "List active local Collab hosts (no links; use `cgs collab link`)" },
+ 			{ name: "status", description: "Show link + participants" },
+ 			{ name: "stop", description: "Stop sharing" },
+ 		],
+diff --git a/packages/coding-agent/src/stream/settings.ts b/packages/coding-agent/src/stream/settings.ts
+index 7b9a3db..2cde2e0 100644
+--- a/packages/coding-agent/src/stream/settings.ts
++++ b/packages/coding-agent/src/stream/settings.ts
+@@ -17,7 +17,7 @@ export const cfgStreamServerUrl = register({
+ 		group: "Stream",
+ 		label: "Stream Server",
+ 		description:
+-			"Live stream server used by `omp stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>",
++			"Live stream server used by `cgs stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>",
+ 	},
+ });
+ 
+diff --git a/packages/coding-agent/src/task/ovnfs.ts b/packages/coding-agent/src/task/ovnfs.ts
+index f068e80..ea70538 100644
+--- a/packages/coding-agent/src/task/ovnfs.ts
++++ b/packages/coding-agent/src/task/ovnfs.ts
+@@ -70,7 +70,7 @@ async function releaseCheckoutRecord(dir: string, command: string, checkout: str
+ 	try {
+ 		if (!(await releaseOvnfsCheckout(dir))) await removeCheckout(command, checkout);
+ 	} catch (err) {
+-		logger.warn("ovnfs checkout removal failed; `omp worktree clear` retries it", {
++		logger.warn("ovnfs checkout removal failed; `cgs worktree clear` retries it", {
+ 			dir,
+ 			checkout,
+ 			error: err instanceof Error ? err.message : String(err),
+@@ -143,7 +143,7 @@ class OvnfsWorkspace implements IsolationWorkspace {
+ 				await removeCheckout(this.command, start);
+ 				await Bun.write(recordPath, JSON.stringify(record));
+ 			} catch (err) {
+-				logger.warn("ovnfs start checkout removal failed; `omp worktree clear` retries it", {
++				logger.warn("ovnfs start checkout removal failed; `cgs worktree clear` retries it", {
+ 					checkout: start,
+ 					error: err instanceof Error ? err.message : String(err),
+ 				});
+@@ -224,7 +224,7 @@ export function ovnfsWorkspace(command: string, session?: string): OpenWorkspace
+ 						error: message,
+ 					});
+ 					throw new Error(
+-						`ovnfs isolation failed: could not release the previous checkout (${message}); its record was kept for \`omp worktree clear\` (set isolation.backend to a native backend to bypass ovnfs)`,
++						`ovnfs isolation failed: could not release the previous checkout (${message}); its record was kept for \`cgs worktree clear\` (set isolation.backend to a native backend to bypass ovnfs)`,
+ 					);
+ 				}
+ 				logger.warn("moved a stale ovnfs checkout record aside after removal failed", {
+diff --git a/packages/coding-agent/src/task/settings.ts b/packages/coding-agent/src/task/settings.ts
+index e539dbe..0cec55c 100644
+--- a/packages/coding-agent/src/task/settings.ts
++++ b/packages/coding-agent/src/task/settings.ts
+@@ -242,7 +242,7 @@ export const cfgWorktreeBase = register({
+ 		group: "Isolation",
+ 		label: "Worktree Base Directory",
+ 		description:
+-			"Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `omp worktree` cleanup all live here. Unset uses ~/.omp/wt. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_WORKTREE_DIR env var overrides this.",
++			"Base directory for agent-managed worktrees — task-isolation copies, `github` PR checkouts, and `cgs worktree` cleanup all live here. Unset uses ~/.omp/wt. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_WORKTREE_DIR env var overrides this.",
+ 	},
+ });
+ effect(cfgWorktreeBase, value => {
+diff --git a/packages/coding-agent/src/tools/bash.ts b/packages/coding-agent/src/tools/bash.ts
+index 55614fe..b81e775 100644
+--- a/packages/coding-agent/src/tools/bash.ts
++++ b/packages/coding-agent/src/tools/bash.ts
+@@ -1953,7 +1953,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
+ 			const rewritten = rewriteGitWorktreeAdd(command, resolveCliEntryCmd());
+ 			if (rewritten !== command) {
+ 				pendingNotices.push(
+-					"Ran `git worktree add` as `omp worktree add`: a copy-on-write clone of the checkout without .git, other worktrees, or untracked .env files. Set worktree.clone=false for plain git.",
++					"Ran `git worktree add` as `cgs worktree add`: a copy-on-write clone of the checkout without .git, other worktrees, or untracked .env files. Set worktree.clone=false for plain git.",
+ 				);
+ 				command = rewritten;
+ 			}
+diff --git a/packages/coding-agent/src/tools/browser/registry.ts b/packages/coding-agent/src/tools/browser/registry.ts
+index 3c2fb18..8e6f6e8 100644
+--- a/packages/coding-agent/src/tools/browser/registry.ts
++++ b/packages/coding-agent/src/tools/browser/registry.ts
+@@ -322,7 +322,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
+ 		}
+ 		if (outcome === "unreachable") {
+ 			throw new ToolError(
+-				`Nothing serves the omp browser relay at ${cdpUrl}: Chrome is not running with the omp extension. Open Chrome; if the extension is loaded, run \`omp browser-relay install\` to register its native host.`,
++				`Nothing serves the omp browser relay at ${cdpUrl}: Chrome is not running with the omp extension. Open Chrome; if the extension is loaded, run \`cgs browser-relay install\` to register its native host.`,
+ 			);
+ 		}
+ 		if (outcome === "no-extension") {
+@@ -332,7 +332,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
+ 		}
+ 		if (outcome === "outdated-relay") {
+ 			throw new ToolError(
+-				`The browser relay at ${cdpUrl} comes from an older omp. Run \`omp browser-relay install\` with this omp, then reload the omp extension in Chrome.`,
++				`The browser relay at ${cdpUrl} comes from an older omp. Run \`cgs browser-relay install\` with this omp, then reload the omp extension in Chrome.`,
+ 			);
+ 		}
+ 		if (outcome === "outdated-extension") {
+diff --git a/packages/coding-agent/src/tools/browser/relay/bridge.ts b/packages/coding-agent/src/tools/browser/relay/bridge.ts
+index e4072a7..e5b5c18 100644
+--- a/packages/coding-agent/src/tools/browser/relay/bridge.ts
++++ b/packages/coding-agent/src/tools/browser/relay/bridge.ts
+@@ -2747,7 +2747,7 @@ export class RelayBridge {
+ 			this.#replyError(
+ 				conn,
+ 				msg,
+-				"the omp relay extension in this browser predates download tracking; run `omp browser-relay install` and reload the extension in chrome://extensions",
++				"the omp relay extension in this browser predates download tracking; run `cgs browser-relay install` and reload the extension in chrome://extensions",
+ 			);
+ 			return false;
+ 		}
+diff --git a/packages/coding-agent/src/tools/browser/relay/probe.ts b/packages/coding-agent/src/tools/browser/relay/probe.ts
+index 616e3fc..9266132 100644
+--- a/packages/coding-agent/src/tools/browser/relay/probe.ts
++++ b/packages/coding-agent/src/tools/browser/relay/probe.ts
+@@ -160,7 +160,7 @@ export async function requestRelayRestart(
+ }
+ 
+ /** The steps that replace an out-of-date relay extension. */
+-export const UPDATE_RELAY_EXTENSION = "Run `omp browser-relay install` and reload the omp extension in Chrome.";
++export const UPDATE_RELAY_EXTENSION = "Run `cgs browser-relay install` and reload the omp extension in Chrome.";
+ 
+ /**
+  * Notice for an open through a ready relay where a connected extension was
+diff --git a/packages/coding-agent/src/tools/browser/settings.ts b/packages/coding-agent/src/tools/browser/settings.ts
+index f4a541f..b8e1cf0 100644
+--- a/packages/coding-agent/src/tools/browser/settings.ts
++++ b/packages/coding-agent/src/tools/browser/settings.ts
+@@ -38,7 +38,7 @@ export const cfgBrowserRelay = register({
+ 		group: "Grep & Browser",
+ 		label: "Browser Relay",
+ 		description:
+-			'Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); its native host serves the relay while Chrome runs. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override, or PI_BROWSER_RELAY=only to make it the only browser (sessions started from the extension\'s side panel). Subagents skip it unless an open passes app: "relay" or the relay is the only browser.',
++			'Drive your own Chrome tabs through the omp browser relay. Install the extension once (`cgs browser-relay install`); its native host serves the relay while Chrome runs. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override, or PI_BROWSER_RELAY=only to make it the only browser (sessions started from the extension\'s side panel). Subagents skip it unless an open passes app: "relay" or the relay is the only browser.',
+ 	},
+ });
+ 
+diff --git a/packages/coding-agent/src/tools/browser/shared-daemon.ts b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+index 94546d3..b97257a 100644
+--- a/packages/coding-agent/src/tools/browser/shared-daemon.ts
++++ b/packages/coding-agent/src/tools/browser/shared-daemon.ts
+@@ -193,7 +193,7 @@ export async function ensureSharedBrowser(opts: {
+ 		// start restores the stale session; the claim holder starts Chrome instead.
+ 		if (!claim) {
+ 			throw new ToolError(
+-				`Shared browser daemon unavailable: ${reason ? `${reason}, and ` : ""}another omp process held the shared browser profile while starting Chrome. \`omp ps\` lists the ${name} unit.`,
++				`Shared browser daemon unavailable: ${reason ? `${reason}, and ` : ""}another omp process held the shared browser profile while starting Chrome. \`cgs ps\` lists the ${name} unit.`,
+ 			);
+ 		}
+ 		await seedOwnedProfilePreferences(userDataDir);
+@@ -208,7 +208,7 @@ export async function ensureSharedBrowser(opts: {
+ 		);
+ 		if (typeof started !== "string") return started;
+ 		throw new ToolError(
+-			`Shared browser daemon unavailable: ${reason ? `${reason}; its replacement failed: ` : ""}${started}. \`omp ps\` lists the ${name} unit.`,
++			`Shared browser daemon unavailable: ${reason ? `${reason}; its replacement failed: ` : ""}${started}. \`cgs ps\` lists the ${name} unit.`,
+ 		);
+ 	} finally {
+ 		claim?.release();
+diff --git a/packages/coding-agent/src/ui/overlays/plugins/settings.tsx b/packages/coding-agent/src/ui/overlays/plugins/settings.tsx
+index 5a2b520..d855766 100644
+--- a/packages/coding-agent/src/ui/overlays/plugins/settings.tsx
++++ b/packages/coding-agent/src/ui/overlays/plugins/settings.tsx
+@@ -327,10 +327,10 @@ function ListPanel(props: { entries: readonly PluginListEntry[]; selected: numbe
+ 			{ k: "gap" },
+ 			{ k: "text", spans: [{ s: "muted", t: "No plugins installed" }] },
+ 			{ k: "gap" },
+-			{ k: "text", spans: [{ s: "dim", t: "Install npm plugins:        omp plugin install <package>" }] },
++			{ k: "text", spans: [{ s: "dim", t: "Install npm plugins:        cgs plugin install <package>" }] },
+ 			{
+ 				k: "text",
+-				spans: [{ s: "dim", t: "Install marketplace plugins: omp plugin install <name>@<marketplace>" }],
++				spans: [{ s: "dim", t: "Install marketplace plugins: cgs plugin install <name>@<marketplace>" }],
+ 			},
+ 			{ k: "gap" },
+ 		];
+@@ -339,10 +339,10 @@ function ListPanel(props: { entries: readonly PluginListEntry[]; selected: numbe
+ 				<text spans={[{ s: "muted", t: "No plugins installed" }]} />
+ 				<kv
+ 					items={[
+-						{ k: "Install npm plugins", v: [{ s: "code", t: "omp plugin install <package>" }] },
++						{ k: "Install npm plugins", v: [{ s: "code", t: "cgs plugin install <package>" }] },
+ 						{
+ 							k: "Install marketplace plugins",
+-							v: [{ s: "code", t: "omp plugin install <name>@<marketplace>" }],
++							v: [{ s: "code", t: "cgs plugin install <name>@<marketplace>" }],
+ 						},
+ 					]}
+ 				/>
+@@ -903,7 +903,7 @@ export function createPluginSettings(
+ 				lead:
+ 					rows.length > 0
+ 						? "Plugins installed for you and this project. Configure one to turn it or its features on and off."
+-						: "No plugins installed. Install one with omp plugin install <package>, or <name>@<marketplace>.",
++						: "No plugins installed. Install one with cgs plugin install <package>, or <name>@<marketplace>.",
+ 				sections: rows.length > 0 ? [{ id: "installed", title: "Installed", rows }] : [],
+ 				focus: current.entries[current.selected] ? entryValue(current.entries[current.selected]!) : null,
+ 				editing: null,
+diff --git a/packages/coding-agent/src/ui/setup/scenes/updates.tsx b/packages/coding-agent/src/ui/setup/scenes/updates.tsx
+index bf364ea..54ffd90 100644
+--- a/packages/coding-agent/src/ui/setup/scenes/updates.tsx
++++ b/packages/coding-agent/src/ui/setup/scenes/updates.tsx
+@@ -21,7 +21,7 @@ export const updatesScene: SetupScene = {
+ 					label: "1 Update automatically",
+ 					detail: "Installs in the background; the next launch runs it",
+ 				},
+-				{ value: "notify", label: "2 Notify me", detail: "Show a notice on startup; run omp update yourself" },
++				{ value: "notify", label: "2 Notify me", detail: "Show a notice on startup; run cgs update yourself" },
+ 			],
+ 			initial: context.host.autoUpdate ? "auto" : "notify",
+ 			commit: mode => context.host.saveAutoUpdate(mode === "auto"),
+diff --git a/packages/coding-agent/src/ui/styles/apps/ps-top/look.ts b/packages/coding-agent/src/ui/styles/apps/ps-top/look.ts
+index 389729c..1c09fe4 100644
+--- a/packages/coding-agent/src/ui/styles/apps/ps-top/look.ts
++++ b/packages/coding-agent/src/ui/styles/apps/ps-top/look.ts
+@@ -109,7 +109,7 @@ defineRolePainter("col", "omp.app.ps", (node, cx): Block => {
+ 	const last = model.lastRefresh();
+ 
+ 	const header = (title: string): string => {
+-		const left = ` ${pen.bold("omp ps")} ${pen.dim("·")} ${title}`;
++		const left = ` ${pen.bold("cgs ps")} ${pen.dim("·")} ${title}`;
+ 		const right = pen.dim(last ? `updated ${formatDuration(now - last)} ago` : "updating…");
+ 		const pad = Math.max(1, width - visibleWidth(left) - visibleWidth(right) - 1);
+ 		return truncate(`${left}${" ".repeat(pad)}${right}`, width);
+diff --git a/packages/coding-agent/src/ui/welcome/tips.txt b/packages/coding-agent/src/ui/welcome/tips.txt
+index 6b9429f..01e9992 100644
+--- a/packages/coding-agent/src/ui/welcome/tips.txt
++++ b/packages/coding-agent/src/ui/welcome/tips.txt
+@@ -6,18 +6,18 @@ Start your prompt with `$ ` to run Python — `$$ ` runs it without adding the o
+ You can /btw to ask a side question
+ Use /tan to fork the current conversation into a background agent
+ With default keybindings, {key:ctrl+d} deletes the character under the cursor instead of quitting your draft — see /hotkeys for your exit key
+-Find out which model you emotionally abuse the most with `omp stats`
++Find out which model you emotionally abuse the most with `cgs stats`
+ Try task isolation to create CoW worktrees
+ Need a cheap nested model call? Use `completion(x...)`. Have a big batch of tasks? Ask clanker to use it!
+ Spaghetti code? Try complaining with /omfg
+-Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c` resumes the right one
++Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `cgs -c` resumes the right one
+ Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow rainbow as you type
+ Agent overthinking? Say `chillax` — on models with per-message effort, thinking drops to the lowest level, even mid-turn — watch it glow as you type
+ Say `orchestrate` in your message to drive a multi-phase task with parallel subagents — watch it glow as you type
+ Say `workflowz` in your message to drive the task with parallel subagents in eval — watch it glow as you type
+ Bulk data to classify or triage? Say `jevify` in your message — the eval kernel's `judge()` processes the batch and you read only what it flags — watch it glow as you type
+ Log in to several accounts of the same provider — `/login` again — and omp load-balances across them automatically
+-Run `omp auth-broker serve` once and every machine pulls live tokens over the wire — refresh keys never leave the host; `omp auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client can hit
++Run `cgs auth-broker serve` once and every machine pulls live tokens over the wire — refresh keys never leave the host; `cgs auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client can hit
+ Press {key:alt+p} (or /switch) to switch provider, and {key:ctrl+p} to cycle role models smol -> slow -> etc
+ Press {key:ctrl+r} to search your prompt history and reuse a past message
+ `/force read` pins the next turn to one specific tool when the model keeps reaching for the wrong one
+@@ -30,5 +30,5 @@ Turn on `/advisor` to attach a second model that reviews every turn and quietly
+ Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)
+ Press {key:shift+tab} to cycle through reasoning effort levels
+ omp can reconfigure and extend itself — ask any questions you have!
+-Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — {key:escape} cancels
++Lint/type errors piling up? `cgs cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — {key:escape} cancels
+ [NO-TERN] Psst, omp has a natural habitat 🐦 [tern](https://scl.so/tern)
+\ No newline at end of file
+diff --git a/packages/collab-web/src/app.tsx b/packages/collab-web/src/app.tsx
+index a662508..b1e0ab5 100644
+--- a/packages/collab-web/src/app.tsx
++++ b/packages/collab-web/src/app.tsx
+@@ -104,7 +104,7 @@ export function App(): ReactNode {
+ 	}, [connect]);
+ 
+ 	useEffect(() => {
+-		if (!client) document.title = "omp collab";
++		if (!client) document.title = "cgs collab";
+ 	}, [client]);
+ 
+ 	if (!client) {
+diff --git a/packages/collab-web/src/components/shell/HeaderBar.tsx b/packages/collab-web/src/components/shell/HeaderBar.tsx
+index b1f06a9..cfac04c 100644
+--- a/packages/collab-web/src/components/shell/HeaderBar.tsx
++++ b/packages/collab-web/src/components/shell/HeaderBar.tsx
+@@ -51,7 +51,7 @@ export const HeaderBar = memo(function HeaderBar({
+ 	return (
+ 		<header className="sh-header">
+ 			<div className="sh-header-left">
+-				<span className="sh-brand" aria-label="omp collab">
++				<span className="sh-brand" aria-label="cgs collab">
+ 					<OmpMark />
+ 					<span className="sh-brand-slash">/</span>
+ 				</span>
+diff --git a/packages/metaharness/src/tb/agent.ts b/packages/metaharness/src/tb/agent.ts
+index 6ca6b2e..cac64e3 100644
+--- a/packages/metaharness/src/tb/agent.ts
++++ b/packages/metaharness/src/tb/agent.ts
+@@ -103,7 +103,7 @@ export async function installAgent(
+ 	const chmod = await vm.exec(`chmod 755 ${shellQuote(entrypoint)}`);
+ 	if (chmod.exitCode !== 0) throw new Error(`Could not make omp executable: ${chmod.stderr.trim()}`);
+ 	const warmup = await vm.exec(`${shellQuote(entrypoint)} --version`);
+-	if (warmup.exitCode !== 0) throw new Error(`omp --version failed: ${warmup.stderr.trim()}`);
++	if (warmup.exitCode !== 0) throw new Error(`cgs --version failed: ${warmup.stderr.trim()}`);
+ 
+ 	const providers = [...new Set(gateway.providers)];
+ 	const modelLines = ["# Generated by metaharness — auth via host pm2 gateway.", "providers:"];
+diff --git a/packages/stats/src/client/routes/FrustrationRoute.tsx b/packages/stats/src/client/routes/FrustrationRoute.tsx
+index 7854ffa..81e80e2 100644
+--- a/packages/stats/src/client/routes/FrustrationRoute.tsx
++++ b/packages/stats/src/client/routes/FrustrationRoute.tsx
+@@ -186,7 +186,7 @@ interface JudgePanelProps {
+ }
+ 
+ const UNAVAILABLE_HINT =
+-	"Judging needs the omp host process: open the dashboard with omp stats and configure a judge model. Until then messages are classified by regex signals.";
++	"Judging needs the omp host process: open the dashboard with cgs stats and configure a judge model. Until then messages are classified by regex signals.";
+ 
+ function JudgePanel({ active, range, judgeAvailable, job, onRunStarted, onRunChanged }: JudgePanelProps) {
+ 	const [modalOpen, setModalOpen] = useState(false);
+diff --git a/packages/stats/src/frustration.ts b/packages/stats/src/frustration.ts
+index 2f3a992..dabc720 100644
+--- a/packages/stats/src/frustration.ts
++++ b/packages/stats/src/frustration.ts
+@@ -79,7 +79,7 @@ const ATTEMPTS_PER_TEXT = 3;
+ const CIRCUIT_BREAKER_FAILURES = 25;
+ 
+ const NO_PROVIDER_REASON =
+-	"This dashboard was started without a judge (standalone omp-stats). Run `omp stats` to classify.";
++	"This dashboard was started without a judge (standalone omp-stats). Run `cgs stats` to classify.";
+ const NO_MODEL_REASON = "No judge model is available. Configure the `judge` model role.";
+ 
+ let judgeProvider: StatsJudgeProvider | undefined;
+diff --git a/packages/utils/src/dirs.ts b/packages/utils/src/dirs.ts
+index 466073c..b90cd0c 100644
+--- a/packages/utils/src/dirs.ts
++++ b/packages/utils/src/dirs.ts
+@@ -19,8 +19,8 @@ import { engines, version } from "../package.json" with { type: "json" };
+ import { isEnoent, isEnotdir } from "./fs-error";
+ import { isBunTestRuntime } from "./test-runtime";
+ 
+-/** App name (e.g. "omp") */
+-export const APP_NAME: string = "omp";
++/** The command name users type (the CGS build installs as `cgs`); every hint that names the command prints it. */
++export const APP_NAME: string = "cgs";
+ 
+ /** Public homepage that inference gateways (OpenRouter, Vercel AI Gateway) credit omp traffic to. */
+ export const APP_URL: string = "https://omp.sh/";
+-- 
+2.47.3
+

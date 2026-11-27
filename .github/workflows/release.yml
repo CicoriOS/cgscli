@@ -19,6 +19,7 @@ jobs:
           bun install --frozen-lockfile
           bun scripts/fetch-omp.ts /tmp/omp-build
           bun scripts/replay-patches.ts /tmp/omp-build
+          bun scripts/brand-commands.ts /tmp/omp-build --check
           context=$(mktemp -d)
           cp "$(command -v bun)" "$context/bun"
           docker build -f docker/Dockerfile.build -t cgscli-build "$context"
