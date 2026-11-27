@@ -26,6 +26,41 @@ test("the manifest uses declared inputs, not model families, and defaults to tex
   expect(buildManifest("http://x", ids).providers.flatMap((p) => p.models.map((x) => x.input))).toEqual(ids.map(() => ["text"]));
 });
 
+test("the manifest carries declared limits and thinking levels and invents nothing for what is undeclared", () => {
+  const ids = ["claude-a", "gpt-5", "deepseek-v4.1-flash", "glm-5"];
+  const m = buildManifest("http://x", ids, {}, {
+    "claude-a": { input: ["text"], context_window: 128000, max_output_tokens: 32000, reasoning: true, thinking_levels: ["low", "high", "xhigh"] },
+    "gpt-5": { input: ["text"], context_window: 271000, reasoning: false, thinking_levels: ["low", "high"] },
+    "deepseek-v4.1-flash": { input: ["text"], thinking_levels: ["low", "max"] },
+  });
+  const by = Object.fromEntries(m.providers.flatMap((p) => p.models.map((x) => [x.id, x])));
+  expect(by["claude-a"]).toMatchObject({ contextWindow: 128000, maxTokens: 32000, reasoning: true, thinking: { mode: "anthropic-adaptive", efforts: ["low", "high", "xhigh"] } });
+  // reasoning declared false wins over levels: no thinking declaration, and an undeclared output limit stays absent.
+  expect(by["gpt-5"]).toMatchObject({ contextWindow: 271000, reasoning: false });
+  expect(by["gpt-5"]).not.toHaveProperty("thinking");
+  expect(by["gpt-5"]).not.toHaveProperty("maxTokens");
+  // levels alone imply a reasoning model, in the effort mode of the openai-completions channel.
+  expect(by["deepseek-v4.1-flash"]).toMatchObject({ reasoning: true, thinking: { mode: "effort", efforts: ["low", "max"] } });
+  expect(by["deepseek-v4.1-flash"]).not.toHaveProperty("contextWindow");
+  for (const key of ["contextWindow", "maxTokens", "reasoning", "thinking"]) expect(by["glm-5"]).not.toHaveProperty(key);
+});
+
+test("the extension hands declared limits and thinking levels to omp and leaves undeclared ones out", async () => {
+  const hub = createProviderHub({
+    router: router(),
+    models: ["claude-a", "claude-b"],
+    capabilities: { "claude-a": { input: ["text"], context_window: 1000000, max_output_tokens: 64000, thinking_levels: ["minimal", "low", "high"] } },
+  });
+  const reg: Record<string, Record<string, unknown>> = {};
+  await registerChannels({ registerProvider: (n, c) => void (reg[n] = c), registerCommand: () => {} }, (i, init) => hub.fetch(new Request(i, init)));
+  const [a, b] = reg["cgs-claude"]!.models as Record<string, unknown>[];
+  expect(a).toMatchObject({ id: "claude-a", contextWindow: 1000000, maxTokens: 64000, reasoning: true, thinking: { mode: "anthropic-adaptive", efforts: ["minimal", "low", "high"] } });
+  expect(b).toMatchObject({ id: "claude-b", reasoning: false });
+  expect(b!.contextWindow).toBeUndefined();
+  expect(b!.maxTokens).toBeUndefined();
+  expect(b).not.toHaveProperty("thinking");
+});
+
 test("the extension registers the input modalities served by the hub manifest", async () => {
   const hub = createProviderHub({ router: router(), models: ["deepseek-v4.1-flash", "deepseek-v4-pro"], capabilities: { "deepseek-v4.1-flash": { input: ["text", "image", "audio", "video", "pdf"] } } });
   const reg: Record<string, Record<string, unknown>> = {};

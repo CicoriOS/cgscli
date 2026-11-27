@@ -74,14 +74,16 @@ test("capability fetch sanitizes inputs and optional metadata and drops malforme
     expect(r.url).toBe("https://cgs.example/api/device/models");
     expect(r.headers.get("authorization")).toBe("Bearer sk-client");
     return ok({ models: {
-      "claude-a": { input: ["image", "image", "unknown", "constructor", null, 42, { type: "audio" }], thinking_levels: [false, "low"], source: "admin" },
-      "gpt-5": { input: ["bogus"], thinking_levels: "high", source: true },
+      "claude-a": { input: ["image", "image", "unknown", "constructor", null, 42, { type: "audio" }], thinking_levels: [false, "low", "turbo", "XHIGH"], source: "admin", context_window: 128000, max_output_tokens: 1.5, reasoning: "yes" },
+      "gpt-5": { input: ["bogus"], thinking_levels: "high", source: true, context_window: 0, max_output_tokens: "32000", reasoning: false },
+      "gpt-6": { input: ["text"], context_window: -1, max_output_tokens: 2 ** 60 },
       empty: null, wrong: { input: "image" }, missing: { source: "admin" }, array: ["image"],
     } });
   }, `${login.baseUrl}/`, login.clientSecret);
   expect(result).toEqual({
-    "claude-a": { input: ["text", "image"], thinking_levels: ["low"], source: "admin" },
-    "gpt-5": { input: ["text"] },
+    "claude-a": { input: ["text", "image"], thinking_levels: ["low"], source: "admin", context_window: 128000 },
+    "gpt-5": { input: ["text"], reasoning: false },
+    "gpt-6": { input: ["text"] },
   });
 });
 

@@ -106,6 +106,7 @@ export async function registerChannels(pi: ExtensionApi, via: FetchFn): Promise<
         input: m.input?.length ? m.input : ["text"],
         contextWindow: m.contextWindow,
         maxTokens: m.maxTokens,
+        ...(m.thinking ? { thinking: m.thinking } : {}),
         cost: { input: m.price?.input ?? 0, output: m.price?.output ?? 0, cacheRead: m.price?.cacheRead ?? 0, cacheWrite: m.price?.cacheWrite ?? 0 },
       })),
     });

@@ -10,10 +10,25 @@ export interface Router {
 }
 
 export type InputModality = "text" | "image" | "audio" | "video" | "pdf";
-export type ModelCapabilities = Record<string, { input: InputModality[]; thinking_levels?: string[]; source?: string }>;
+/**
+ * What the CGS server declares about one model (`GET /api/device/models`, ADR 0043). A field the server does not declare
+ * is absent, and the client never supplies a value of its own for it.
+ */
+export interface ModelCapability {
+  input: InputModality[];
+  source?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  reasoning?: boolean;
+  thinking_levels?: string[];
+}
+export type ModelCapabilities = Record<string, ModelCapability>;
+
+/** omp's thinking declaration for a model: how its effort levels reach the wire and which levels it offers. */
+export interface ThinkingDeclaration { mode: "effort" | "anthropic-adaptive" | "google-level"; efforts: string[] }
 
 export interface ModelEntry {
-  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; input?: InputModality[];
+  id: string; name: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean; thinking?: ThinkingDeclaration; input?: InputModality[];
   price?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 export interface ModelManifest { providers: { id: string; channel: string; baseUrl: string; models: ModelEntry[] }[] }

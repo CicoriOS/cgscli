@@ -1,6 +1,6 @@
 import { displayName } from "./display-name.ts";
 // Channel classification, model manifest and the channel path prefix (docs: cgsconnect/providers.md, ADR 0021, ADR 0022).
-import type { ModelCapabilities, ModelEntry, ModelManifest } from "../contracts.ts";
+import type { ModelCapabilities, ModelEntry, ModelManifest, ThinkingDeclaration } from "../contracts.ts";
 
 export const CHANNELS = ["cgs-claude", "cgs-antigravity", "cgs-codex", "cgs-openai"] as const;
 export type Channel = (typeof CHANNELS)[number];
@@ -24,15 +24,13 @@ export function channelForModel(id: string): Channel | null {
   return "cgs-openai";
 }
 
-// Defaults for reasoning and token limits not supplied by the relay's model list.
-interface Family { test: RegExp; reasoning: boolean; contextWindow: number; maxTokens: number }
-const FAMILIES: Family[] = [
-  { test: /^claude/i, reasoning: true, contextWindow: 200000, maxTokens: 32000 },
-  { test: /^gemini/i, reasoning: true, contextWindow: 1048576, maxTokens: 65536 },
-  { test: /^deepseek/i, reasoning: true, contextWindow: 1000000, maxTokens: 65536 },
-  { test: /^(glm|grok|kimi|minimax)/i, reasoning: true, contextWindow: 131072, maxTokens: 8192 },
-];
-const FALLBACK: Omit<Family, "test"> = { reasoning: false, contextWindow: 128000, maxTokens: 16384 };
+/** omp's `thinking.mode` per channel: the mode omp itself derives for that channel's wire API. */
+const THINKING_MODE: Record<Channel, ThinkingDeclaration["mode"]> = {
+  "cgs-claude": "anthropic-adaptive",
+  "cgs-antigravity": "google-level",
+  "cgs-codex": "effort",
+  "cgs-openai": "effort",
+};
 
 export interface SitePrice { input: number; output: number; cache_read?: number; cache_write?: number }
 
@@ -48,10 +46,21 @@ export function buildManifest(localBase: string, modelIds: string[], pricing: Re
   for (const id of new Set(modelIds.map((m) => m.trim()).filter(Boolean))) {
     const ch = channelForModel(id);
     if (!ch) continue;
-    const f = FAMILIES.find((x) => x.test.test(id)) ?? FALLBACK;
+    const declared = capabilities[id];
+    const levels = declared?.thinking_levels;
+    const reasoning = declared?.reasoning ?? (levels ? true : undefined);
     const price = manifestPrice(pricing[id]);
     const list = by.get(ch) ?? [];
-    list.push({ id, name: displayName(id), contextWindow: f.contextWindow, maxTokens: f.maxTokens, reasoning: f.reasoning, input: capabilities[id]?.input ?? ["text"], ...(price ? { price } : {}) });
+    list.push({
+      id,
+      name: displayName(id),
+      ...(declared?.context_window ? { contextWindow: declared.context_window } : {}),
+      ...(declared?.max_output_tokens ? { maxTokens: declared.max_output_tokens } : {}),
+      ...(reasoning === undefined ? {} : { reasoning }),
+      ...(reasoning && levels ? { thinking: { mode: THINKING_MODE[ch], efforts: levels } } : {}),
+      input: declared?.input ?? ["text"],
+      ...(price ? { price } : {}),
+    });
     by.set(ch, list);
   }
   return {

@@ -121,23 +121,27 @@ export async function fetchPricing(via: Via, baseUrl: string, secret: string, si
 }
 
 const INPUT_MODALITIES: Record<InputModality, true> = { text: true, image: true, audio: true, video: true, pdf: true };
+const THINKING_LEVELS: Record<string, true> = { minimal: true, low: true, medium: true, high: true, xhigh: true, max: true };
 
 function parseModelCapabilities(value: unknown): ModelCapabilities | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const models: ModelCapabilities = Object.create(null);
   for (const [id, entry] of Object.entries(value)) {
     if (!id.trim() || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const { input, thinking_levels, source } = entry as Record<string, unknown>;
+    const { input, thinking_levels, source, context_window, max_output_tokens, reasoning } = entry as Record<string, unknown>;
     if (!Array.isArray(input)) continue;
     const modalities = new Set<InputModality>(["text"]);
     for (const modality of input) {
       if (typeof modality === "string" && Object.hasOwn(INPUT_MODALITIES, modality)) modalities.add(modality as InputModality);
     }
-    const levels = Array.isArray(thinking_levels) ? thinking_levels.filter((level): level is string => typeof level === "string") : [];
+    const levels = Array.isArray(thinking_levels) ? thinking_levels.filter((level): level is string => typeof level === "string" && Object.hasOwn(THINKING_LEVELS, level)) : [];
     models[id] = {
       input: [...modalities],
       ...(levels.length ? { thinking_levels: levels } : {}),
       ...(typeof source === "string" ? { source } : {}),
+      ...(typeof context_window === "number" && Number.isSafeInteger(context_window) && context_window > 0 ? { context_window } : {}),
+      ...(typeof max_output_tokens === "number" && Number.isSafeInteger(max_output_tokens) && max_output_tokens > 0 ? { max_output_tokens } : {}),
+      ...(typeof reasoning === "boolean" ? { reasoning } : {}),
     };
   }
   return models;
