@@ -47,7 +47,7 @@ try {
   await run([process.execPath, "install", "-g", tarball], env);
   const cgs = path.join(bunInstall, "bin/cgs");
   const version = (await run([cgs, "--version"], env)).trim();
-  if (!/^omp\/\d+\.\d+\.\d+-cgs\.\d+$/.test(version)) throw new Error(`unexpected version: ${version}`);
+  if (!/^cgs\/\d+\.\d+\.\d+-cgs\.\d+$/.test(version)) throw new Error(`unexpected version: ${version}`);
 
   await mkdir(path.join(agentDir, "cgs"), { recursive: true });
   await writeFile(path.join(agentDir, "models.yml"), "providers:\n  fake:\n    baseUrl: http://127.0.0.1:9/v1\n    apiKey: x\n    api: openai-completions\n    models:\n      - id: echo\n        name: Echo\n        contextWindow: 32000\n        maxTokens: 4096\n");
