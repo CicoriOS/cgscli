@@ -60,10 +60,12 @@ export interface ReplayResult { ok: boolean; applied: number; log: string; confl
 /** `git am --3way` the series onto the checkout; on failure aborts and lists conflicting files. */
 export function replayPatches(ompDir: string, patches: string[]): ReplayResult {
   if (patches.length === 0) return { ok: true, applied: 0, log: "no patches", conflicts: [] };
-  const r = git(ompDir, ["-c", "user.name=cgscli", "-c", "user.email=cgscli@localhost", "am", "--3way", ...patches]);
+  const identity = ["-c", "user.name=cgscli", "-c", "user.email=cgscli@localhost"];
+  const r = git(ompDir, [...identity, "am", "--3way", ...patches]);
   if (r.ok) return { ok: true, applied: patches.length, log: r.out, conflicts: [] };
   const conflicts = git(ompDir, ["diff", "--name-only", "--diff-filter=U"]).out.split("\n").filter(Boolean);
-  git(ompDir, ["am", "--abort"]);
+  // `am --abort` fails with "Committer identity unknown" on a runner without a global identity, leaving the tree half-applied.
+  git(ompDir, [...identity, "am", "--abort"]);
   return { ok: false, applied: 0, log: r.out, conflicts };
 }
 
