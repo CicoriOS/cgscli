@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // Usage: bun scripts/pack-release.ts [n] [--omp-dir DIR] [--out-dir DIR]
 // Run after omp's gen:bundle. Writes cicori-cgs-<omp version>-cgs.<n>.tgz, the tarball published to npm as @cicori/cgs.
+// <n> is `N` (a release) or `N.M` (a fix to release N; ADR 0044). Never choose a new N yourself: only the owner raises it.
 import { chmod, copyFile, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { isBuiltin } from "node:module";
 import os from "node:os";
@@ -109,7 +110,7 @@ async function main() {
     options: { "omp-dir": { type: "string" }, "out-dir": { type: "string" } },
   });
   const n = positionals[0] ?? process.env.CGS_RELEASE_N ?? "1";
-  if (positionals.length > 1 || !/^[1-9]\d*$/.test(n)) throw new Error("Expected one positive integer release number (or CGS_RELEASE_N)");
+  if (positionals.length > 1 || !/^[1-9]\d*(\.[1-9]\d*)?$/.test(n)) throw new Error("Expected one release number, N or N.M, e.g. 6 or 5.2 (or CGS_RELEASE_N)");
   const omp = path.resolve(values["omp-dir"] ?? "/tmp/omp-build");
   const out = path.resolve(values["out-dir"] ?? ".");
   const agent = path.join(omp, "packages/coding-agent");

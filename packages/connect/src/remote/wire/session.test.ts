@@ -196,19 +196,15 @@ describe("first connection, fingerprint before the password", () => {
     expect(store.saved).toBeNull();
   });
 
-  test("a device that predates the announce flag still works: no key in the challenge, the browser asks for the password first", async () => {
-    const creds = createDeviceCredentials(verifier);
-    const store = new MemoryStore();
-    const l = link(creds, store, undefined);
-    await l.browser.start();
-    const oldStart = await l.device.receive(Uint8Array.of(0x01)); // what a browser without the flag sends
-    expect(oldStart.outgoing[0]).toHaveLength(1 + 16 + 16 + 65);
-    l.browserEvents.push(...(await l.browser.receive(oldStart.outgoing[0]!)).events);
-    expect(l.browserEvents).toEqual([{ type: "challenged" }]);
-
-    await finish(l, PASSWORD);
-    expect(types(l.browserEvents)).toEqual(["challenged", "pinned", "authenticated"]);
-    expect(store.saved?.pin).toBe(creds.staticKey.publicKey);
+  test("a device from before the key announcement cannot connect: no fallback, and the password is never asked for", async () => {
+    const l = link(createDeviceCredentials(verifier), new MemoryStore(), undefined);
+    const [start] = (await l.browser.start()).outgoing;
+    const challenge = (await l.device.receive(start!)).outgoing[0]!;
+    const old = challenge.slice(0, challenge.length - 32); // what such a device sends: no key
+    const step = await l.browser.receive(old);
+    expect(step.outgoing).toEqual([]);
+    expect(step.events).toEqual([{ type: "auth_failed", via: "password", code: "device_outdated" }]);
+    await expect(l.browser.answer(PASSWORD)).rejects.toThrow("challenge");
   });
 
   test("a key announced in the challenge that the device then replaces is refused", async () => {
@@ -220,7 +216,7 @@ describe("first connection, fingerprint before the password", () => {
     challenge.set(fromBase64(impostor.staticKey.publicKey), challenge.length - 32); // someone on the path swaps the announced key
     l.browserEvents.push(...(await l.browser.receive(challenge)).events);
     expect(l.browserEvents).toEqual([{ type: "challenged", pin: impostor.staticKey.publicKey }]);
-    await expect(finish(l, PASSWORD)).rejects.toThrow("announced");
+    await expect(finish(l, PASSWORD)).rejects.toThrow("PW_CHALLENGE");
   });
 
   test("answer needs a challenge", async () => {
@@ -230,7 +226,7 @@ describe("first connection, fingerprint before the password", () => {
     await expect(l.browser.answer(PASSWORD)).rejects.toThrow("challenge");
   });
 
-  test("a locked device refuses the announce request the same way", async () => {
+  test("a locked device refuses the first-connection request the same way", async () => {
     const l = link(createDeviceCredentials(verifier), new MemoryStore(), undefined, { allowed: () => false });
     await handshake(l);
     expect(l.browserEvents).toEqual([{ type: "auth_failed", via: "password", code: "locked" }]);
